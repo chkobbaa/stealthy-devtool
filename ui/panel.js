@@ -16,6 +16,8 @@ const exportBtn = document.getElementById("exportBtn");
 const exportHarBtn = document.getElementById("exportHarBtn");
 const debuggerBtn = document.getElementById("debuggerBtn");
 const captureStatus = document.getElementById("captureStatus");
+const tabSelect = document.getElementById("tabSelect");
+const refreshTabsBtn = document.getElementById("refreshTabsBtn");
 const detailsTitle = document.getElementById("detailsTitle");
 
 const tabPanels = {
@@ -387,13 +389,53 @@ function attachUiListeners() {
     }
     updateCaptureStatus();
   });
+
+  tabSelect.addEventListener("change", async () => {
+    const nextId = Number(tabSelect.value);
+    if (!Number.isFinite(nextId)) return;
+    state.tabId = nextId;
+    await loadInitialRequests();
+  });
+
+  refreshTabsBtn.addEventListener("click", () => {
+    populateTabList();
+  });
+}
+
+function getTabIdFromUrl() {
+  const params = new URLSearchParams(window.location.search);
+  const value = Number(params.get("tabId"));
+  return Number.isFinite(value) ? value : null;
+}
+
+async function populateTabList() {
+  const tabs = await chrome.tabs.query({});
+  tabSelect.innerHTML = "";
+  const relevant = tabs.filter((tab) => tab.id && tab.url && !tab.url.startsWith("chrome-extension://"));
+  for (const tab of relevant) {
+    const option = document.createElement("option");
+    option.value = String(tab.id);
+    option.textContent = `${tab.title || tab.url}`;
+    tabSelect.appendChild(option);
+  }
+
+  if (state.tabId && relevant.some((t) => t.id === state.tabId)) {
+    tabSelect.value = String(state.tabId);
+    return;
+  }
+
+  if (relevant.length) {
+    state.tabId = relevant[0].id;
+    tabSelect.value = String(state.tabId);
+  }
 }
 
 async function loadInitialRequests() {
-  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-  const activeTab = tabs[0];
-  if (!activeTab) return;
-  state.tabId = activeTab.id;
+  if (state.tabId == null) {
+    state.tabId = getTabIdFromUrl();
+  }
+  await populateTabList();
+  if (state.tabId == null) return;
   const response = await chrome.runtime.sendMessage({ type: "getRequests", tabId: state.tabId });
   state.requests = response.requests || [];
   const dbg = await chrome.runtime.sendMessage({ type: "getDebuggerStatus", tabId: state.tabId });
@@ -435,7 +477,8 @@ chrome.runtime.onMessage.addListener((message) => {
 });
 
 chrome.tabs.onActivated.addListener(() => {
-  loadInitialRequests();
+  // Do not auto-switch target; user controls it.
+  populateTabList();
 });
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {

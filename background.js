@@ -158,8 +158,9 @@ function upsertEntry(tabId, requestId, mutator) {
   });
 }
 
-chrome.action.onClicked.addListener(async () => {
-  const url = chrome.runtime.getURL("ui/panel.html");
+chrome.action.onClicked.addListener(async (tab) => {
+  const tabId = tab && tab.id ? tab.id : null;
+  const url = chrome.runtime.getURL(`ui/panel.html?tabId=${tabId || ""}`);
   await chrome.tabs.create({ url });
 });
 
