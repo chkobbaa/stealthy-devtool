@@ -666,7 +666,8 @@ function broadcastDownloadUpdate() {
     totalBytes: activeDownload.totalBytes,
     duration: activeDownload.duration,
     startTime: activeDownload.startTime,
-    statusText: activeDownload.statusText
+    statusText: activeDownload.statusText,
+    speed: activeDownload.speed || 0
   };
   
   chrome.runtime.sendMessage({ type: "downloadProgress", data: state }).catch(() => {});
@@ -1043,46 +1044,75 @@ async function startBackgroundDownload(data) {
       }
     }
     
-    // Download all segments
-    for (let i = 0; i < activeDownload.segments.length; i++) {
-      // Wait while paused
-      while (activeDownload.paused && !activeDownload.aborted) {
-        activeDownload.statusText = `Paused at ${activeDownload.downloaded}/${activeDownload.total}`;
-        broadcastDownloadUpdate();
-        await new Promise(r => setTimeout(r, 200));
-      }
-      
-      if (activeDownload.aborted) {
-        throw new Error("Canceled by user");
-      }
-      
-      const seg = activeDownload.segments[i];
-      
-      try {
-        const data = await fetchSegment(seg.url);
-        activeDownload.results[i] = data;
-        activeDownload.totalBytes += data.byteLength;
-        activeDownload.downloaded++;
-        
-        activeDownload.statusText = `${activeDownload.downloaded}/${activeDownload.total} (${formatBytes(activeDownload.totalBytes)})`;
-        broadcastDownloadUpdate();
-        
-        // Update storage periodically
-        if (i % 10 === 0) {
-          await updateDownloadInStorage(activeDownload.id, {
-            downloaded: activeDownload.downloaded,
-            totalBytes: activeDownload.totalBytes,
-            statusText: activeDownload.statusText
-          });
+    // Download all segments with concurrency for speed
+    const CONCURRENT_DOWNLOADS = 8;
+    let currentIndex = 0;
+    let completedCount = 0;
+    let lastBroadcast = Date.now();
+    let bytesAtLastBroadcast = 0;
+    activeDownload.speed = 0;
+    
+    async function downloadWorker() {
+      while (currentIndex < activeDownload.segments.length) {
+        // Wait while paused
+        while (activeDownload.paused && !activeDownload.aborted) {
+          activeDownload.statusText = `Paused at ${activeDownload.downloaded}/${activeDownload.total}`;
+          activeDownload.speed = 0;
+          broadcastDownloadUpdate();
+          await new Promise(r => setTimeout(r, 200));
         }
-      } catch (e) {
-        console.warn(`Failed to download segment ${i}:`, e);
-        activeDownload.downloaded++;
+        
+        if (activeDownload.aborted) {
+          throw new Error("Canceled by user");
+        }
+        
+        const segIndex = currentIndex++;
+        if (segIndex >= activeDownload.segments.length) break;
+        
+        const seg = activeDownload.segments[segIndex];
+        
+        try {
+          const data = await fetchSegment(seg.url);
+          activeDownload.results[segIndex] = data;
+          activeDownload.totalBytes += data.byteLength;
+          activeDownload.downloaded++;
+          completedCount++;
+          
+          // Calculate speed and update UI (throttled)
+          const now = Date.now();
+          if (now - lastBroadcast > 250) {
+            const elapsed = (now - lastBroadcast) / 1000;
+            const bytesDiff = activeDownload.totalBytes - bytesAtLastBroadcast;
+            activeDownload.speed = bytesDiff / elapsed;
+            bytesAtLastBroadcast = activeDownload.totalBytes;
+            lastBroadcast = now;
+            
+            activeDownload.statusText = `${activeDownload.downloaded}/${activeDownload.total} (${formatBytes(activeDownload.totalBytes)}) - ${formatBytes(activeDownload.speed)}/s`;
+            broadcastDownloadUpdate();
+          }
+          
+          // Update storage periodically
+          if (completedCount % 20 === 0) {
+            await updateDownloadInStorage(activeDownload.id, {
+              downloaded: activeDownload.downloaded,
+              totalBytes: activeDownload.totalBytes,
+              statusText: activeDownload.statusText
+            });
+          }
+        } catch (e) {
+          console.warn(`Failed to download segment ${segIndex}:`, e);
+          activeDownload.downloaded++;
+          completedCount++;
+        }
       }
-      
-      // Small delay
-      await new Promise(r => setTimeout(r, 25));
     }
+    
+    // Start concurrent workers
+    const workers = [];
+    for (let i = 0; i < CONCURRENT_DOWNLOADS; i++) {
+      workers.push(downloadWorker());
+    }
+    await Promise.all(workers);
     
     if (activeDownload.aborted) {
       throw new Error("Canceled by user");

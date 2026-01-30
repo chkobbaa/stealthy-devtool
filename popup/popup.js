@@ -804,7 +804,10 @@ function showDownloadProgress(state) {
   if (state.total > 0) {
     const percent = Math.round((state.downloaded / state.total) * 100);
     progressFill.style.width = `${percent}%`;
-    progressText.textContent = `${state.downloaded}/${state.total} segments (${formatBytes(state.totalBytes || 0)})`;
+    
+    // Show speed if available
+    const speedText = state.speed ? ` • ${formatBytes(state.speed)}/s` : "";
+    progressText.textContent = `${state.downloaded}/${state.total} segments (${formatBytes(state.totalBytes || 0)})${speedText}`;
   }
   
   if (state.status === "paused") {
@@ -834,16 +837,15 @@ function showDownloadControls() {
   
   downloadControlsDiv = document.createElement("div");
   downloadControlsDiv.className = "download-controls";
-  downloadControlsDiv.style.cssText = "display: flex; gap: 8px; margin-top: 8px;";
   
   const pauseBtn = document.createElement("button");
-  pauseBtn.className = "btn btn-secondary";
+  pauseBtn.className = "btn btn-pause";
   pauseBtn.id = "pauseResumeBtn";
   pauseBtn.innerHTML = "⏸ Pause";
   
   const cancelBtn = document.createElement("button");
-  cancelBtn.className = "btn btn-secondary";
-  cancelBtn.textContent = "Cancel";
+  cancelBtn.className = "btn btn-cancel";
+  cancelBtn.textContent = "✕ Cancel";
   
   pauseBtn.addEventListener("click", async () => {
     const status = await chrome.runtime.sendMessage({ type: "getDownloadStatus" });
@@ -851,9 +853,11 @@ function showDownloadControls() {
       if (status.active.status === "paused") {
         chrome.runtime.sendMessage({ type: "resumeDownload", downloadId: status.active.id });
         pauseBtn.innerHTML = "⏸ Pause";
+        pauseBtn.className = "btn btn-pause";
       } else {
         chrome.runtime.sendMessage({ type: "pauseDownload", downloadId: status.active.id });
         pauseBtn.innerHTML = "▶ Resume";
+        pauseBtn.className = "btn btn-resume";
       }
     }
   });
@@ -886,13 +890,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "downloadProgress") {
     showDownloadProgress(message.data);
     
-    // Update pause button text
+    // Update pause button text and style
     const pauseBtn = document.getElementById("pauseResumeBtn");
     if (pauseBtn) {
       if (message.data.status === "paused") {
         pauseBtn.innerHTML = "▶ Resume";
+        pauseBtn.className = "btn btn-resume";
       } else if (message.data.status === "downloading") {
         pauseBtn.innerHTML = "⏸ Pause";
+        pauseBtn.className = "btn btn-pause";
       }
     }
   }
