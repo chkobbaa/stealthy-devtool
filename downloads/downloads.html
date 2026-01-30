@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Downloads - Stealthy Network</title>
+    <link rel="stylesheet" href="downloads.css" />
+  </head>
+  <body>
+    <header class="header">
+      <h1>📥 Downloads</h1>
+      <div class="header-actions">
+        <button id="clearCompletedBtn" class="btn btn-secondary">Clear Completed</button>
+      </div>
+    </header>
+
+    <main class="content">
+      <div id="activeDownloads" class="downloads-section">
+        <h2>Active Downloads</h2>
+        <div id="activeList" class="download-list">
+          <div class="empty-state">No active downloads</div>
+        </div>
+      </div>
+
+      <div id="completedDownloads" class="downloads-section">
+        <h2>Completed</h2>
+        <div id="completedList" class="download-list">
+          <div class="empty-state">No completed downloads</div>
+        </div>
+      </div>
+    </main>
+
+    <script src="downloads.js"></script>
+  </body>
+</html>

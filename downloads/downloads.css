@@ -1,0 +1,257 @@
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  background: #f8f9fa;
+  color: #1f2328;
+  min-height: 100vh;
+}
+
+.header {
+  background: #1a73e8;
+  color: #fff;
+  padding: 16px 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+
+.header h1 {
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.header-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.btn {
+  padding: 8px 16px;
+  border: none;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.btn-secondary {
+  background: rgba(255, 255, 255, 0.2);
+  color: #fff;
+}
+
+.btn-secondary:hover {
+  background: rgba(255, 255, 255, 0.3);
+}
+
+.btn-primary {
+  background: #1a73e8;
+  color: #fff;
+}
+
+.btn-primary:hover {
+  background: #1557b0;
+}
+
+.btn-small {
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
+.btn-pause {
+  background: #f59e0b;
+  color: #fff;
+}
+
+.btn-pause:hover {
+  background: #d97706;
+}
+
+.btn-resume {
+  background: #10b981;
+  color: #fff;
+}
+
+.btn-resume:hover {
+  background: #059669;
+}
+
+.btn-cancel {
+  background: #ef4444;
+  color: #fff;
+}
+
+.btn-cancel:hover {
+  background: #dc2626;
+}
+
+.content {
+  padding: 24px;
+  max-width: 900px;
+  margin: 0 auto;
+}
+
+.downloads-section {
+  margin-bottom: 32px;
+}
+
+.downloads-section h2 {
+  font-size: 14px;
+  font-weight: 600;
+  color: #5f6368;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 12px;
+}
+
+.download-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.empty-state {
+  color: #9aa0a6;
+  font-size: 13px;
+  padding: 24px;
+  text-align: center;
+  background: #fff;
+  border-radius: 8px;
+  border: 1px dashed #d0d4da;
+}
+
+.download-item {
+  background: #fff;
+  border: 1px solid #d0d4da;
+  border-radius: 8px;
+  padding: 16px;
+  transition: box-shadow 0.2s;
+}
+
+.download-item:hover {
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+}
+
+.download-item.paused {
+  border-color: #f59e0b;
+  background: #fffbeb;
+}
+
+.download-item.completed {
+  border-color: #10b981;
+}
+
+.download-item.error {
+  border-color: #ef4444;
+  background: #fef2f2;
+}
+
+.download-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 12px;
+}
+
+.download-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.download-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #1f2328;
+  margin-bottom: 4px;
+  word-break: break-word;
+}
+
+.download-meta {
+  font-size: 12px;
+  color: #5f6368;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.download-actions {
+  display: flex;
+  gap: 6px;
+  margin-left: 12px;
+}
+
+.progress-container {
+  margin-top: 12px;
+}
+
+.progress-bar {
+  height: 6px;
+  background: #e8eaed;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  background: #1a73e8;
+  border-radius: 3px;
+  transition: width 0.3s;
+}
+
+.progress-fill.paused {
+  background: #f59e0b;
+}
+
+.progress-text {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: #5f6368;
+  margin-top: 6px;
+}
+
+.status-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.status-badge.downloading {
+  background: #e3f2fd;
+  color: #1565c0;
+}
+
+.status-badge.paused {
+  background: #fff3e0;
+  color: #e65100;
+}
+
+.status-badge.completed {
+  background: #e8f5e9;
+  color: #2e7d32;
+}
+
+.status-badge.error {
+  background: #ffebee;
+  color: #c62828;
+}
+
+/* Animation for active downloads */
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
+}
+
+.download-item.downloading .progress-fill {
+  animation: pulse 1.5s ease-in-out infinite;
+}

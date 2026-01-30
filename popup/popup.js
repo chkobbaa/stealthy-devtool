@@ -3,6 +3,7 @@ const noVideos = document.getElementById("noVideos");
 const status = document.getElementById("status");
 const refreshBtn = document.getElementById("refreshBtn");
 const advancedBtn = document.getElementById("advancedBtn");
+const clearCookiesBtn = document.getElementById("clearCookiesBtn");
 const segmentGroup = document.getElementById("segmentGroup");
 const segmentCount = document.getElementById("segmentCount");
 const copyFfmpegBtn = document.getElementById("copyFfmpegBtn");
@@ -18,6 +19,7 @@ let currentTabId = null;
 let currentPageUrl = "";
 let detectedManifest = null;
 let detectedSegments = [];
+let detectedVideos = []; // All detected video entries (manifests + direct videos)
 let isDownloading = false;
 
 // Segment file patterns
@@ -223,6 +225,317 @@ function getVideoType(entry) {
   return "Video";
 }
 
+// ============================================
+// MANIFEST PARSING - Get ALL segments from manifest
+// ============================================
+
+function resolveUrl(base, relative) {
+  try {
+    return new URL(relative, base).href;
+  } catch {
+    return relative;
+  }
+}
+
+async function fetchManifestText(url) {
+  try {
+    const response = await fetch(url, {
+      mode: "cors",
+      credentials: "include"
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return await response.text();
+  } catch (e) {
+    console.warn("Failed to fetch manifest:", e);
+    return null;
+  }
+}
+
+async function parseHlsManifest(manifestUrl) {
+  const text = await fetchManifestText(manifestUrl);
+  if (!text) return { segments: [], duration: 0 };
+  
+  const lines = text.split("\n").map(l => l.trim());
+  const segments = [];
+  let totalDuration = 0;
+  let currentDuration = 0;
+  let initSegment = null;
+  
+  // Check if this is a master playlist (contains variant streams)
+  const variantLines = lines.filter(l => l.includes(".m3u8") && !l.startsWith("#"));
+  if (variantLines.length > 0) {
+    // This is a master playlist - find the highest quality variant
+    let bestVariant = null;
+    let bestBandwidth = 0;
+    
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (line.startsWith("#EXT-X-STREAM-INF:")) {
+        const bwMatch = line.match(/BANDWIDTH=(\d+)/);
+        const bandwidth = bwMatch ? parseInt(bwMatch[1], 10) : 0;
+        
+        // Next non-comment line is the URL
+        for (let j = i + 1; j < lines.length; j++) {
+          if (!lines[j].startsWith("#") && lines[j].length > 0) {
+            if (bandwidth > bestBandwidth) {
+              bestBandwidth = bandwidth;
+              bestVariant = resolveUrl(manifestUrl, lines[j]);
+            }
+            break;
+          }
+        }
+      }
+    }
+    
+    if (bestVariant) {
+      // Recursively parse the variant playlist
+      return await parseHlsManifest(bestVariant);
+    }
+  }
+  
+  // Parse media playlist
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    
+    // Get segment duration
+    if (line.startsWith("#EXTINF:")) {
+      const durationMatch = line.match(/#EXTINF:([\d.]+)/);
+      if (durationMatch) {
+        currentDuration = parseFloat(durationMatch[1]);
+      }
+    }
+    
+    // Get init segment (for fMP4/CMAF)
+    if (line.startsWith("#EXT-X-MAP:")) {
+      const uriMatch = line.match(/URI="([^"]+)"/);
+      if (uriMatch) {
+        initSegment = resolveUrl(manifestUrl, uriMatch[1]);
+      }
+    }
+    
+    // Segment URL (non-comment, non-empty line after EXTINF)
+    if (!line.startsWith("#") && line.length > 0 && (line.includes(".ts") || line.includes(".m4s") || line.includes(".m4v") || line.includes(".aac") || line.includes(".mp4"))) {
+      const segmentUrl = resolveUrl(manifestUrl, line);
+      segments.push({
+        url: segmentUrl,
+        duration: currentDuration
+      });
+      totalDuration += currentDuration;
+      currentDuration = 0;
+    }
+  }
+  
+  return { segments, duration: totalDuration, initSegment };
+}
+
+async function parseDashManifest(manifestUrl) {
+  const text = await fetchManifestText(manifestUrl);
+  if (!text) return { segments: [], duration: 0 };
+  
+  const segments = [];
+  let totalDuration = 0;
+  let initSegment = null;
+  
+  try {
+    const parser = new DOMParser();
+    const xml = parser.parseFromString(text, "text/xml");
+    
+    // Get total duration from MPD
+    const mpd = xml.querySelector("MPD");
+    if (mpd) {
+      const durationAttr = mpd.getAttribute("mediaPresentationDuration");
+      if (durationAttr) {
+        totalDuration = parseDuration(durationAttr);
+      }
+    }
+    
+    // Find video AdaptationSet with highest bandwidth
+    const adaptationSets = xml.querySelectorAll("AdaptationSet");
+    let bestRepresentation = null;
+    let bestBandwidth = 0;
+    
+    for (const as of adaptationSets) {
+      const mimeType = as.getAttribute("mimeType") || "";
+      const contentType = as.getAttribute("contentType") || "";
+      
+      // Prefer video
+      if (mimeType.includes("video") || contentType === "video") {
+        const representations = as.querySelectorAll("Representation");
+        for (const rep of representations) {
+          const bandwidth = parseInt(rep.getAttribute("bandwidth") || "0", 10);
+          if (bandwidth > bestBandwidth) {
+            bestBandwidth = bandwidth;
+            bestRepresentation = rep;
+          }
+        }
+      }
+    }
+    
+    // Fall back to any representation
+    if (!bestRepresentation) {
+      const allReps = xml.querySelectorAll("Representation");
+      for (const rep of allReps) {
+        const bandwidth = parseInt(rep.getAttribute("bandwidth") || "0", 10);
+        if (bandwidth > bestBandwidth) {
+          bestBandwidth = bandwidth;
+          bestRepresentation = rep;
+        }
+      }
+    }
+    
+    if (bestRepresentation) {
+      const baseUrl = getBaseUrl(manifestUrl, xml);
+      
+      // Check for SegmentTemplate
+      const segmentTemplate = bestRepresentation.querySelector("SegmentTemplate") ||
+                              bestRepresentation.parentElement.querySelector("SegmentTemplate");
+      
+      if (segmentTemplate) {
+        const init = segmentTemplate.getAttribute("initialization");
+        const media = segmentTemplate.getAttribute("media");
+        const startNumber = parseInt(segmentTemplate.getAttribute("startNumber") || "1", 10);
+        const timescale = parseInt(segmentTemplate.getAttribute("timescale") || "1", 10);
+        
+        if (init) {
+          initSegment = resolveUrl(baseUrl, init.replace("$RepresentationID$", bestRepresentation.getAttribute("id") || ""));
+        }
+        
+        // Get segment timeline or calculate from duration
+        const segmentTimeline = segmentTemplate.querySelector("SegmentTimeline");
+        
+        if (segmentTimeline) {
+          const sElements = segmentTimeline.querySelectorAll("S");
+          let time = 0;
+          let segmentNumber = startNumber;
+          
+          for (const s of sElements) {
+            const t = s.getAttribute("t") ? parseInt(s.getAttribute("t"), 10) : time;
+            const d = parseInt(s.getAttribute("d"), 10);
+            const r = parseInt(s.getAttribute("r") || "0", 10);
+            
+            time = t;
+            
+            for (let i = 0; i <= r; i++) {
+              const segUrl = media
+                .replace("$RepresentationID$", bestRepresentation.getAttribute("id") || "")
+                .replace("$Number$", String(segmentNumber))
+                .replace("$Time$", String(time));
+              
+              segments.push({
+                url: resolveUrl(baseUrl, segUrl),
+                duration: d / timescale
+              });
+              
+              time += d;
+              segmentNumber++;
+            }
+          }
+        } else {
+          // Calculate segments from duration
+          const segmentDuration = parseInt(segmentTemplate.getAttribute("duration") || "0", 10);
+          if (segmentDuration > 0 && totalDuration > 0) {
+            const numSegments = Math.ceil(totalDuration / (segmentDuration / timescale));
+            
+            for (let i = 0; i < numSegments; i++) {
+              const segUrl = media
+                .replace("$RepresentationID$", bestRepresentation.getAttribute("id") || "")
+                .replace("$Number$", String(startNumber + i))
+                .replace("$Time$", String(i * segmentDuration));
+              
+              segments.push({
+                url: resolveUrl(baseUrl, segUrl),
+                duration: segmentDuration / timescale
+              });
+            }
+          }
+        }
+      }
+      
+      // Check for SegmentList
+      const segmentList = bestRepresentation.querySelector("SegmentList");
+      if (segmentList && segments.length === 0) {
+        const initEl = segmentList.querySelector("Initialization");
+        if (initEl) {
+          initSegment = resolveUrl(baseUrl, initEl.getAttribute("sourceURL") || "");
+        }
+        
+        const segmentUrls = segmentList.querySelectorAll("SegmentURL");
+        for (const segUrl of segmentUrls) {
+          segments.push({
+            url: resolveUrl(baseUrl, segUrl.getAttribute("media") || ""),
+            duration: 0
+          });
+        }
+      }
+      
+      // Check for BaseURL (single segment)
+      if (segments.length === 0) {
+        const baseUrlEl = bestRepresentation.querySelector("BaseURL");
+        if (baseUrlEl) {
+          segments.push({
+            url: resolveUrl(baseUrl, baseUrlEl.textContent || ""),
+            duration: totalDuration
+          });
+        }
+      }
+    }
+  } catch (e) {
+    console.error("Failed to parse DASH manifest:", e);
+  }
+  
+  return { segments, duration: totalDuration, initSegment };
+}
+
+function getBaseUrl(manifestUrl, xml) {
+  const baseUrlEl = xml.querySelector("BaseURL");
+  if (baseUrlEl && baseUrlEl.textContent) {
+    return resolveUrl(manifestUrl, baseUrlEl.textContent);
+  }
+  // Use manifest URL directory as base
+  return manifestUrl.substring(0, manifestUrl.lastIndexOf("/") + 1);
+}
+
+function parseDuration(iso8601) {
+  // Parse ISO 8601 duration (PT1H2M3.4S)
+  const match = iso8601.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:([\d.]+)S)?/);
+  if (!match) return 0;
+  
+  const hours = parseInt(match[1] || "0", 10);
+  const minutes = parseInt(match[2] || "0", 10);
+  const seconds = parseFloat(match[3] || "0");
+  
+  return hours * 3600 + minutes * 60 + seconds;
+}
+
+function formatDuration(seconds) {
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = Math.floor(seconds % 60);
+  
+  if (h > 0) {
+    return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+  }
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+async function parseManifest(manifestUrl) {
+  if (!manifestUrl) return null;
+  
+  const lower = manifestUrl.toLowerCase();
+  
+  if (lower.includes(".m3u8")) {
+    return await parseHlsManifest(manifestUrl);
+  }
+  
+  if (lower.includes(".mpd")) {
+    return await parseDashManifest(manifestUrl);
+  }
+  
+  return null;
+}
+
+// ============================================
+
 function getFileName(url) {
   try {
     const parsed = new URL(url);
@@ -332,6 +645,7 @@ async function scanForVideos() {
   segmentGroup.style.display = "none";
   detectedManifest = null;
   detectedSegments = [];
+  detectedVideos = [];
   
   try {
     const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -422,12 +736,23 @@ async function scanForVideos() {
     // Store for segment group actions
     detectedManifest = uniqueManifests[0] || null;
     detectedSegments = uniqueSegments;
+    detectedVideos = [...uniqueManifests, ...uniqueVideos]; // Store all detected videos including manifests
+    
+    // Get segmentInfo element
+    const segmentInfo = document.getElementById("segmentInfo");
     
     // Show segment group if we have segments or manifests
     if (uniqueSegments.length > 0 || uniqueManifests.length > 0) {
       segmentGroup.style.display = "block";
-      const totalParts = uniqueSegments.length + uniqueManifests.length;
       segmentCount.textContent = `${uniqueSegments.length} segments, ${uniqueManifests.length} manifest(s)`;
+      
+      // Update info based on what we detected
+      if (uniqueManifests.length > 0) {
+        const manifestType = uniqueManifests[0].url.toLowerCase().includes(".m3u8") ? "HLS" : "DASH";
+        segmentInfo.innerHTML = `<strong>${manifestType}</strong> stream detected. Click download to get the <strong>full video</strong> (all segments will be fetched from manifest).`;
+      } else if (uniqueSegments.length > 0) {
+        segmentInfo.innerHTML = `<strong>${uniqueSegments.length}</strong> segments buffered so far. For full video, let more buffer or find manifest.`;
+      }
     }
     
     // Sort direct videos by size
@@ -464,6 +789,134 @@ async function scanForVideos() {
   } catch (error) {
     status.textContent = "Error scanning page.";
     console.error(error);
+  }
+}
+
+// ============================================
+// DOWNLOAD PROGRESS UI
+// ============================================
+
+let downloadControlsDiv = null;
+
+function showDownloadProgress(state) {
+  downloadProgress.style.display = "block";
+  
+  if (state.total > 0) {
+    const percent = Math.round((state.downloaded / state.total) * 100);
+    progressFill.style.width = `${percent}%`;
+    progressText.textContent = `${state.downloaded}/${state.total} segments (${formatBytes(state.totalBytes || 0)})`;
+  }
+  
+  if (state.status === "paused") {
+    progressText.textContent = `⏸ Paused - ${state.downloaded}/${state.total}`;
+    progressFill.classList.add("paused");
+  } else {
+    progressFill.classList.remove("paused");
+  }
+  
+  if (state.status === "completed") {
+    progressText.textContent = `✓ Done - ${formatBytes(state.totalBytes || 0)}`;
+    isDownloading = false;
+    autoDownloadBtn.disabled = false;
+    autoDownloadBtn.innerHTML = '<span class="btn-icon">⬇</span> Download Full Video';
+    hideDownloadControls();
+  } else if (state.status === "error") {
+    progressText.textContent = `✗ ${state.statusText || "Error"}`;
+    isDownloading = false;
+    autoDownloadBtn.disabled = false;
+    autoDownloadBtn.innerHTML = '<span class="btn-icon">⬇</span> Download Full Video';
+    hideDownloadControls();
+  }
+}
+
+function showDownloadControls() {
+  if (downloadControlsDiv) return;
+  
+  downloadControlsDiv = document.createElement("div");
+  downloadControlsDiv.className = "download-controls";
+  downloadControlsDiv.style.cssText = "display: flex; gap: 8px; margin-top: 8px;";
+  
+  const pauseBtn = document.createElement("button");
+  pauseBtn.className = "btn btn-secondary";
+  pauseBtn.id = "pauseResumeBtn";
+  pauseBtn.innerHTML = "⏸ Pause";
+  
+  const cancelBtn = document.createElement("button");
+  cancelBtn.className = "btn btn-secondary";
+  cancelBtn.textContent = "Cancel";
+  
+  pauseBtn.addEventListener("click", async () => {
+    const status = await chrome.runtime.sendMessage({ type: "getDownloadStatus" });
+    if (status.active) {
+      if (status.active.status === "paused") {
+        chrome.runtime.sendMessage({ type: "resumeDownload", downloadId: status.active.id });
+        pauseBtn.innerHTML = "⏸ Pause";
+      } else {
+        chrome.runtime.sendMessage({ type: "pauseDownload", downloadId: status.active.id });
+        pauseBtn.innerHTML = "▶ Resume";
+      }
+    }
+  });
+  
+  cancelBtn.addEventListener("click", async () => {
+    const status = await chrome.runtime.sendMessage({ type: "getDownloadStatus" });
+    if (status.active) {
+      chrome.runtime.sendMessage({ type: "cancelDownload", downloadId: status.active.id });
+    }
+    isDownloading = false;
+    autoDownloadBtn.disabled = false;
+    autoDownloadBtn.innerHTML = '<span class="btn-icon">⬇</span> Download Full Video';
+    hideDownloadControls();
+  });
+  
+  downloadControlsDiv.appendChild(pauseBtn);
+  downloadControlsDiv.appendChild(cancelBtn);
+  downloadProgress.appendChild(downloadControlsDiv);
+}
+
+function hideDownloadControls() {
+  if (downloadControlsDiv) {
+    downloadControlsDiv.remove();
+    downloadControlsDiv = null;
+  }
+}
+
+// Listen for download progress updates from background
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.type === "downloadProgress") {
+    showDownloadProgress(message.data);
+    
+    // Update pause button text
+    const pauseBtn = document.getElementById("pauseResumeBtn");
+    if (pauseBtn) {
+      if (message.data.status === "paused") {
+        pauseBtn.innerHTML = "▶ Resume";
+      } else if (message.data.status === "downloading") {
+        pauseBtn.innerHTML = "⏸ Pause";
+      }
+    }
+  }
+});
+
+// Check for active download on popup open
+async function checkActiveDownload() {
+  try {
+    const status = await chrome.runtime.sendMessage({ type: "getDownloadStatus" });
+    if (status.active) {
+      isDownloading = true;
+      autoDownloadBtn.disabled = true;
+      autoDownloadBtn.innerHTML = '<span class="btn-icon">⏳</span> Downloading...';
+      showDownloadProgress(status.active);
+      showDownloadControls();
+      
+      // Update pause button based on state
+      const pauseBtn = document.getElementById("pauseResumeBtn");
+      if (pauseBtn && status.active.status === "paused") {
+        pauseBtn.innerHTML = "▶ Resume";
+      }
+    }
+  } catch (e) {
+    // Background not ready yet
   }
 }
 
@@ -518,30 +971,47 @@ function setupSegmentActions() {
     });
   });
   
-  // Auto download - fetches and combines all segments
+  // Auto download - sends to background script for persistent download
   autoDownloadBtn.addEventListener("click", async () => {
-    if (isDownloading) return;
-    
-    if (detectedSegments.length === 0 && !detectedManifest) {
-      progressText.textContent = "No segments to download";
+    // Check if already downloading
+    const status = await chrome.runtime.sendMessage({ type: "getDownloadStatus" });
+    if (status.active) {
+      // Show current progress
+      showDownloadProgress(status.active);
       return;
     }
     
+    // Check for manifest (preferred) or captured segments
+    const manifest = detectedVideos.find(v => 
+      v.url.toLowerCase().includes(".m3u8") || 
+      v.url.toLowerCase().includes(".mpd")
+    );
+    
+    if (detectedSegments.length === 0 && !manifest) {
+      progressText.textContent = "No video stream detected - try playing the video first";
+      downloadProgress.style.display = "block";
+      return;
+    }
+    
+    // Prepare data for background
+    const downloadData = {
+      manifestUrl: manifest?.url || null,
+      segments: detectedSegments.map(s => ({ url: s.url })),
+      initSegmentUrl: findInitSegment(detectedSegments)?.url || null
+    };
+    
+    // Start download in background
+    chrome.runtime.sendMessage({ type: "startDownload", data: downloadData });
+    
+    // Update UI
     isDownloading = true;
     autoDownloadBtn.disabled = true;
     autoDownloadBtn.innerHTML = '<span class="btn-icon">⏳</span> Downloading...';
     downloadProgress.style.display = "block";
+    progressText.textContent = "Starting download...";
+    progressFill.style.width = "0%";
     
-    try {
-      await downloadAndCombineSegments();
-    } catch (error) {
-      console.error("Download failed:", error);
-      progressText.textContent = `Error: ${error.message}`;
-    } finally {
-      isDownloading = false;
-      autoDownloadBtn.disabled = false;
-      autoDownloadBtn.innerHTML = '<span class="btn-icon">▶</span> Download Video';
-    }
+    showDownloadControls();
   });
   
   // Download all segments as separate files
@@ -629,106 +1099,6 @@ function findInitSegment(segments) {
   });
 }
 
-async function downloadAndCombineSegments() {
-  const sortedSegments = sortSegments(detectedSegments);
-  const initSegment = findInitSegment(detectedSegments);
-  
-  // Determine file type
-  const firstUrl = sortedSegments[0]?.url || "";
-  const isTS = firstUrl.toLowerCase().includes(".ts");
-  const isM4S = firstUrl.toLowerCase().includes(".m4s") || firstUrl.toLowerCase().includes(".m4v");
-  
-  const chunks = [];
-  let totalBytes = 0;
-  let downloaded = 0;
-  const total = sortedSegments.length + (initSegment && !sortedSegments.includes(initSegment) ? 1 : 0);
-  
-  progressText.textContent = `Downloading 0/${total} segments...`;
-  progressFill.style.width = "0%";
-  
-  // For m4s, download init segment first
-  if (isM4S && initSegment && !sortedSegments.includes(initSegment)) {
-    try {
-      progressText.textContent = `Downloading init segment...`;
-      const data = await fetchSegment(initSegment.url);
-      chunks.push(data);
-      totalBytes += data.byteLength;
-      downloaded++;
-      progressFill.style.width = `${(downloaded / total) * 100}%`;
-    } catch (e) {
-      console.warn("Failed to download init segment:", e);
-    }
-  }
-  
-  // Download all segments
-  for (let i = 0; i < sortedSegments.length; i++) {
-    const seg = sortedSegments[i];
-    
-    // Skip init if already downloaded
-    if (initSegment && seg.url === initSegment.url && chunks.length > 0) {
-      downloaded++;
-      continue;
-    }
-    
-    try {
-      const data = await fetchSegment(seg.url);
-      chunks.push(data);
-      totalBytes += data.byteLength;
-      downloaded++;
-      
-      const percent = Math.round((downloaded / total) * 100);
-      progressFill.style.width = `${percent}%`;
-      progressText.textContent = `Downloading ${downloaded}/${total} segments (${formatBytes(totalBytes)})...`;
-    } catch (e) {
-      console.warn(`Failed to download segment ${i}:`, e);
-      // Continue with other segments
-    }
-    
-    // Small delay to avoid rate limiting
-    if (i % 3 === 0) {
-      await new Promise((r) => setTimeout(r, 50));
-    }
-  }
-  
-  if (chunks.length === 0) {
-    throw new Error("No segments downloaded");
-  }
-  
-  progressText.textContent = `Combining ${chunks.length} segments...`;
-  progressFill.style.width = "100%";
-  
-  // Combine all chunks into one blob
-  const combined = new Blob(chunks, { type: isTS ? "video/mp2t" : "video/mp4" });
-  
-  // Create download
-  const url = URL.createObjectURL(combined);
-  const filename = `video_${Date.now()}${isTS ? ".ts" : ".mp4"}`;
-  
-  chrome.downloads.download({
-    url: url,
-    filename: filename,
-    saveAs: true
-  }, (downloadId) => {
-    // Clean up blob URL after download starts
-    setTimeout(() => URL.revokeObjectURL(url), 60000);
-  });
-  
-  progressText.textContent = `Done! ${formatBytes(totalBytes)} - saving as ${filename}`;
-}
-
-async function fetchSegment(url) {
-  const response = await fetch(url, {
-    mode: "cors",
-    credentials: "include"
-  });
-  
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status}`);
-  }
-  
-  return await response.arrayBuffer();
-}
-
 refreshBtn.addEventListener("click", () => {
   scanForVideos();
 });
@@ -739,6 +1109,64 @@ advancedBtn.addEventListener("click", async () => {
   window.close();
 });
 
+// Downloads page button
+const downloadsBtn = document.getElementById("downloadsBtn");
+downloadsBtn.addEventListener("click", async () => {
+  const url = chrome.runtime.getURL("downloads/downloads.html");
+  await chrome.tabs.create({ url });
+  window.close();
+});
+
+// Clear cookies for current site
+clearCookiesBtn.addEventListener("click", async () => {
+  try {
+    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+    const tab = tabs[0];
+    if (!tab?.url) return;
+    
+    const url = new URL(tab.url);
+    const domain = url.hostname;
+    
+    // Get all cookies for this domain
+    const cookies = await chrome.cookies.getAll({ domain });
+    
+    // Delete each cookie
+    let deleted = 0;
+    for (const cookie of cookies) {
+      const cookieUrl = `http${cookie.secure ? "s" : ""}://${cookie.domain.startsWith(".") ? cookie.domain.slice(1) : cookie.domain}${cookie.path}`;
+      await chrome.cookies.remove({ url: cookieUrl, name: cookie.name });
+      deleted++;
+    }
+    
+    // Also try with www prefix and without
+    const altDomain = domain.startsWith("www.") ? domain.slice(4) : `www.${domain}`;
+    const altCookies = await chrome.cookies.getAll({ domain: altDomain });
+    for (const cookie of altCookies) {
+      const cookieUrl = `http${cookie.secure ? "s" : ""}://${cookie.domain.startsWith(".") ? cookie.domain.slice(1) : cookie.domain}${cookie.path}`;
+      await chrome.cookies.remove({ url: cookieUrl, name: cookie.name });
+      deleted++;
+    }
+    
+    // Visual feedback
+    const originalText = clearCookiesBtn.textContent;
+    clearCookiesBtn.textContent = `✓ ${deleted}`;
+    clearCookiesBtn.style.background = "rgba(52, 168, 83, 0.6)";
+    
+    setTimeout(() => {
+      clearCookiesBtn.textContent = originalText;
+      clearCookiesBtn.style.background = "";
+    }, 1500);
+    
+  } catch (e) {
+    console.error("Failed to clear cookies:", e);
+    clearCookiesBtn.textContent = "✗";
+    setTimeout(() => {
+      clearCookiesBtn.textContent = "🍪✕";
+    }, 1500);
+  }
+});
+
 // Setup and initial scan
 setupSegmentActions();
 scanForVideos();
+checkActiveDownload();

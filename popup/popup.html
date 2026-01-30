@@ -9,6 +9,7 @@
   <body>
     <header class="header">
       <h1>Stealthy Network</h1>
+      <button id="clearCookiesBtn" class="clear-cookies-btn" title="Clear cookies for this site">🍪✕</button>
     </header>
 
     <main class="content">
@@ -18,16 +19,16 @@
 
       <div id="segmentGroup" class="segment-group" style="display: none;">
         <div class="segment-header">
-          <span class="segment-title">Segmented Stream Detected</span>
+          <span class="segment-title">Streaming Video Detected</span>
           <span id="segmentCount" class="segment-count"></span>
         </div>
-        <div class="segment-info">
-          This video is delivered in segments.
+        <div id="segmentInfo" class="segment-info">
+          This video is delivered via adaptive streaming.
         </div>
         
         <div class="download-section">
           <button id="autoDownloadBtn" class="btn btn-primary">
-            <span class="btn-icon">▶</span> Download Video
+            <span class="btn-icon">⬇</span> Download Full Video
           </button>
           <div id="downloadProgress" class="download-progress" style="display: none;">
             <div class="progress-bar">
@@ -60,6 +61,7 @@
 
       <div class="actions">
         <button id="refreshBtn" class="btn btn-secondary">Refresh</button>
+        <button id="downloadsBtn" class="btn btn-secondary">📥 Downloads</button>
         <button id="advancedBtn" class="btn btn-primary">Advanced Panel</button>
       </div>
     </main>

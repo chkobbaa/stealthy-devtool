@@ -488,5 +488,554 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  // Download manager commands
+  if (message.type === "startDownload") {
+    startBackgroundDownload(message.data);
+    sendResponse({ ok: true });
+    return true;
+  }
+
+  if (message.type === "pauseDownload") {
+    if (activeDownload && activeDownload.id === message.downloadId) {
+      activeDownload.paused = true;
+      updateDownloadInStorage(activeDownload.id, { status: "paused" });
+      broadcastDownloadUpdate();
+    }
+    sendResponse({ ok: true });
+    return true;
+  }
+
+  if (message.type === "resumeDownload") {
+    if (activeDownload && activeDownload.id === message.downloadId) {
+      activeDownload.paused = false;
+      updateDownloadInStorage(activeDownload.id, { status: "downloading" });
+      broadcastDownloadUpdate();
+    }
+    sendResponse({ ok: true });
+    return true;
+  }
+
+  if (message.type === "cancelDownload") {
+    if (activeDownload && activeDownload.id === message.downloadId) {
+      activeDownload.aborted = true;
+      updateDownloadInStorage(activeDownload.id, { status: "error", statusText: "Canceled" });
+      broadcastDownloadUpdate();
+    }
+    sendResponse({ ok: true });
+    return true;
+  }
+
+  if (message.type === "getDownloadStatus") {
+    sendResponse({ 
+      active: activeDownload ? {
+        id: activeDownload.id,
+        status: activeDownload.paused ? "paused" : "downloading",
+        downloaded: activeDownload.downloaded,
+        total: activeDownload.total,
+        totalBytes: activeDownload.totalBytes
+      } : null
+    });
+    return true;
+  }
+
   return false;
 });
+
+// ============================================
+// BACKGROUND DOWNLOAD MANAGER
+// ============================================
+
+let activeDownload = null;
+
+function broadcastDownloadUpdate() {
+  if (!activeDownload) return;
+  
+  const state = {
+    id: activeDownload.id,
+    filename: activeDownload.filename,
+    status: activeDownload.aborted ? "error" : (activeDownload.paused ? "paused" : "downloading"),
+    total: activeDownload.total,
+    downloaded: activeDownload.downloaded,
+    totalBytes: activeDownload.totalBytes,
+    duration: activeDownload.duration,
+    startTime: activeDownload.startTime,
+    statusText: activeDownload.statusText
+  };
+  
+  chrome.runtime.sendMessage({ type: "downloadProgress", data: state }).catch(() => {});
+}
+
+async function updateDownloadInStorage(id, updates) {
+  const result = await chrome.storage.local.get("downloads");
+  const downloads = result.downloads || {};
+  if (downloads[id]) {
+    Object.assign(downloads[id], updates);
+    await chrome.storage.local.set({ downloads });
+  }
+}
+
+async function saveDownloadToStorage(state) {
+  const result = await chrome.storage.local.get("downloads");
+  const downloads = result.downloads || {};
+  downloads[state.id] = state;
+  await chrome.storage.local.set({ downloads });
+}
+
+async function fetchSegment(url) {
+  const response = await fetch(url, {
+    mode: "cors",
+    credentials: "include"
+  });
+  
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+  
+  return await response.arrayBuffer();
+}
+
+function resolveUrl(base, relative) {
+  try {
+    return new URL(relative, base).href;
+  } catch {
+    return relative;
+  }
+}
+
+async function fetchManifestText(url) {
+  try {
+    const response = await fetch(url, { mode: "cors", credentials: "include" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return await response.text();
+  } catch (e) {
+    console.warn("Failed to fetch manifest:", e);
+    return null;
+  }
+}
+
+async function parseHlsManifest(manifestUrl) {
+  const text = await fetchManifestText(manifestUrl);
+  if (!text) return { segments: [], duration: 0 };
+  
+  const lines = text.split("\n").map(l => l.trim());
+  const segments = [];
+  let totalDuration = 0;
+  let currentDuration = 0;
+  let initSegment = null;
+  
+  // Check if this is a master playlist
+  const variantLines = lines.filter(l => l.includes(".m3u8") && !l.startsWith("#"));
+  if (variantLines.length > 0) {
+    let bestVariant = null;
+    let bestBandwidth = 0;
+    
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (line.startsWith("#EXT-X-STREAM-INF:")) {
+        const bwMatch = line.match(/BANDWIDTH=(\d+)/);
+        const bandwidth = bwMatch ? parseInt(bwMatch[1], 10) : 0;
+        
+        for (let j = i + 1; j < lines.length; j++) {
+          if (!lines[j].startsWith("#") && lines[j].length > 0) {
+            if (bandwidth > bestBandwidth) {
+              bestBandwidth = bandwidth;
+              bestVariant = resolveUrl(manifestUrl, lines[j]);
+            }
+            break;
+          }
+        }
+      }
+    }
+    
+    if (bestVariant) {
+      return await parseHlsManifest(bestVariant);
+    }
+  }
+  
+  // Parse media playlist
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    
+    if (line.startsWith("#EXTINF:")) {
+      const durationMatch = line.match(/#EXTINF:([\d.]+)/);
+      if (durationMatch) {
+        currentDuration = parseFloat(durationMatch[1]);
+      }
+    }
+    
+    if (line.startsWith("#EXT-X-MAP:")) {
+      const uriMatch = line.match(/URI="([^"]+)"/);
+      if (uriMatch) {
+        initSegment = resolveUrl(manifestUrl, uriMatch[1]);
+      }
+    }
+    
+    if (!line.startsWith("#") && line.length > 0 && 
+        (line.includes(".ts") || line.includes(".m4s") || line.includes(".m4v") || 
+         line.includes(".aac") || line.includes(".mp4"))) {
+      const segmentUrl = resolveUrl(manifestUrl, line);
+      segments.push({ url: segmentUrl, duration: currentDuration });
+      totalDuration += currentDuration;
+      currentDuration = 0;
+    }
+  }
+  
+  return { segments, duration: totalDuration, initSegment };
+}
+
+async function parseDashManifest(manifestUrl) {
+  const text = await fetchManifestText(manifestUrl);
+  if (!text) return { segments: [], duration: 0 };
+  
+  const segments = [];
+  let totalDuration = 0;
+  let initSegment = null;
+  
+  try {
+    const parser = new DOMParser();
+    const xml = parser.parseFromString(text, "text/xml");
+    
+    const mpd = xml.querySelector("MPD");
+    if (mpd) {
+      const durationAttr = mpd.getAttribute("mediaPresentationDuration");
+      if (durationAttr) {
+        const match = durationAttr.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:([\d.]+)S)?/);
+        if (match) {
+          totalDuration = (parseInt(match[1] || "0", 10) * 3600) + 
+                         (parseInt(match[2] || "0", 10) * 60) + 
+                         parseFloat(match[3] || "0");
+        }
+      }
+    }
+    
+    const adaptationSets = xml.querySelectorAll("AdaptationSet");
+    let bestRepresentation = null;
+    let bestBandwidth = 0;
+    
+    for (const as of adaptationSets) {
+      const mimeType = as.getAttribute("mimeType") || "";
+      const contentType = as.getAttribute("contentType") || "";
+      
+      if (mimeType.includes("video") || contentType === "video") {
+        const representations = as.querySelectorAll("Representation");
+        for (const rep of representations) {
+          const bandwidth = parseInt(rep.getAttribute("bandwidth") || "0", 10);
+          if (bandwidth > bestBandwidth) {
+            bestBandwidth = bandwidth;
+            bestRepresentation = rep;
+          }
+        }
+      }
+    }
+    
+    if (!bestRepresentation) {
+      const allReps = xml.querySelectorAll("Representation");
+      for (const rep of allReps) {
+        const bandwidth = parseInt(rep.getAttribute("bandwidth") || "0", 10);
+        if (bandwidth > bestBandwidth) {
+          bestBandwidth = bandwidth;
+          bestRepresentation = rep;
+        }
+      }
+    }
+    
+    if (bestRepresentation) {
+      const baseUrlEl = xml.querySelector("BaseURL");
+      const baseUrl = baseUrlEl && baseUrlEl.textContent 
+        ? resolveUrl(manifestUrl, baseUrlEl.textContent)
+        : manifestUrl.substring(0, manifestUrl.lastIndexOf("/") + 1);
+      
+      const segmentTemplate = bestRepresentation.querySelector("SegmentTemplate") ||
+                              bestRepresentation.parentElement?.querySelector("SegmentTemplate");
+      
+      if (segmentTemplate) {
+        const init = segmentTemplate.getAttribute("initialization");
+        const media = segmentTemplate.getAttribute("media");
+        const startNumber = parseInt(segmentTemplate.getAttribute("startNumber") || "1", 10);
+        const timescale = parseInt(segmentTemplate.getAttribute("timescale") || "1", 10);
+        
+        if (init) {
+          initSegment = resolveUrl(baseUrl, init.replace("$RepresentationID$", bestRepresentation.getAttribute("id") || ""));
+        }
+        
+        const segmentTimeline = segmentTemplate.querySelector("SegmentTimeline");
+        
+        if (segmentTimeline) {
+          const sElements = segmentTimeline.querySelectorAll("S");
+          let time = 0;
+          let segmentNumber = startNumber;
+          
+          for (const s of sElements) {
+            const t = s.getAttribute("t") ? parseInt(s.getAttribute("t"), 10) : time;
+            const d = parseInt(s.getAttribute("d"), 10);
+            const r = parseInt(s.getAttribute("r") || "0", 10);
+            
+            time = t;
+            
+            for (let i = 0; i <= r; i++) {
+              const segUrl = media
+                .replace("$RepresentationID$", bestRepresentation.getAttribute("id") || "")
+                .replace("$Number$", String(segmentNumber))
+                .replace("$Time$", String(time));
+              
+              segments.push({ url: resolveUrl(baseUrl, segUrl), duration: d / timescale });
+              time += d;
+              segmentNumber++;
+            }
+          }
+        } else {
+          const segmentDuration = parseInt(segmentTemplate.getAttribute("duration") || "0", 10);
+          if (segmentDuration > 0 && totalDuration > 0) {
+            const numSegments = Math.ceil(totalDuration / (segmentDuration / timescale));
+            
+            for (let i = 0; i < numSegments; i++) {
+              const segUrl = media
+                .replace("$RepresentationID$", bestRepresentation.getAttribute("id") || "")
+                .replace("$Number$", String(startNumber + i))
+                .replace("$Time$", String(i * segmentDuration));
+              
+              segments.push({ url: resolveUrl(baseUrl, segUrl), duration: segmentDuration / timescale });
+            }
+          }
+        }
+      }
+    }
+  } catch (e) {
+    console.error("Failed to parse DASH manifest:", e);
+  }
+  
+  return { segments, duration: totalDuration, initSegment };
+}
+
+async function parseManifest(manifestUrl) {
+  if (!manifestUrl) return null;
+  
+  const lower = manifestUrl.toLowerCase();
+  if (lower.includes(".m3u8")) {
+    return await parseHlsManifest(manifestUrl);
+  }
+  if (lower.includes(".mpd")) {
+    return await parseDashManifest(manifestUrl);
+  }
+  return null;
+}
+
+function formatDuration(seconds) {
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = Math.floor(seconds % 60);
+  if (h > 0) {
+    return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+  }
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+function formatBytes(bytes) {
+  if (bytes < 1024) return bytes + " B";
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+  if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+  return (bytes / (1024 * 1024 * 1024)).toFixed(2) + " GB";
+}
+
+async function startBackgroundDownload(data) {
+  const { manifestUrl, segments: capturedSegments, initSegmentUrl: capturedInit } = data;
+  
+  const downloadId = `dl_${Date.now()}`;
+  
+  activeDownload = {
+    id: downloadId,
+    paused: false,
+    aborted: false,
+    downloaded: 0,
+    total: 0,
+    totalBytes: 0,
+    duration: 0,
+    filename: "",
+    statusText: "Starting...",
+    startTime: Date.now(),
+    segments: [],
+    initSegmentUrl: null,
+    initChunk: null,
+    results: []
+  };
+  
+  try {
+    // Parse manifest if available
+    if (manifestUrl) {
+      activeDownload.statusText = "Parsing manifest...";
+      broadcastDownloadUpdate();
+      
+      const parsed = await parseManifest(manifestUrl);
+      
+      if (parsed && parsed.segments && parsed.segments.length > 0) {
+        activeDownload.segments = parsed.segments.map((s, i) => ({
+          url: s.url,
+          duration: s.duration,
+          index: i
+        }));
+        activeDownload.initSegmentUrl = parsed.initSegment;
+        activeDownload.duration = parsed.duration;
+      }
+    }
+    
+    // Fall back to captured segments
+    if (activeDownload.segments.length === 0 && capturedSegments && capturedSegments.length > 0) {
+      activeDownload.segments = capturedSegments.map((s, i) => ({
+        url: s.url,
+        duration: 0,
+        index: i
+      }));
+      activeDownload.initSegmentUrl = capturedInit;
+    }
+    
+    if (activeDownload.segments.length === 0) {
+      throw new Error("No segments found");
+    }
+    
+    activeDownload.total = activeDownload.segments.length;
+    activeDownload.results = new Array(activeDownload.segments.length);
+    
+    // Determine file type
+    const firstUrl = activeDownload.segments[0]?.url || "";
+    const isTS = firstUrl.toLowerCase().includes(".ts");
+    const ext = isTS ? ".ts" : ".mp4";
+    const durationStr = activeDownload.duration > 0 
+      ? `_${formatDuration(activeDownload.duration).replace(/:/g, "m")}s` 
+      : "";
+    activeDownload.filename = `video${durationStr}_${downloadId.slice(3)}${ext}`;
+    
+    // Save initial state
+    await saveDownloadToStorage({
+      id: activeDownload.id,
+      filename: activeDownload.filename,
+      status: "downloading",
+      total: activeDownload.total,
+      downloaded: 0,
+      totalBytes: 0,
+      duration: activeDownload.duration,
+      startTime: activeDownload.startTime,
+      statusText: "Starting..."
+    });
+    
+    broadcastDownloadUpdate();
+    
+    // Download init segment first
+    if (activeDownload.initSegmentUrl) {
+      while (activeDownload.paused && !activeDownload.aborted) {
+        await new Promise(r => setTimeout(r, 200));
+      }
+      if (activeDownload.aborted) throw new Error("Canceled");
+      
+      try {
+        activeDownload.statusText = "Downloading init segment...";
+        broadcastDownloadUpdate();
+        activeDownload.initChunk = await fetchSegment(activeDownload.initSegmentUrl);
+        activeDownload.totalBytes += activeDownload.initChunk.byteLength;
+      } catch (e) {
+        console.warn("Failed to download init segment:", e);
+      }
+    }
+    
+    // Download all segments
+    for (let i = 0; i < activeDownload.segments.length; i++) {
+      // Wait while paused
+      while (activeDownload.paused && !activeDownload.aborted) {
+        activeDownload.statusText = `Paused at ${activeDownload.downloaded}/${activeDownload.total}`;
+        broadcastDownloadUpdate();
+        await new Promise(r => setTimeout(r, 200));
+      }
+      
+      if (activeDownload.aborted) {
+        throw new Error("Canceled by user");
+      }
+      
+      const seg = activeDownload.segments[i];
+      
+      try {
+        const data = await fetchSegment(seg.url);
+        activeDownload.results[i] = data;
+        activeDownload.totalBytes += data.byteLength;
+        activeDownload.downloaded++;
+        
+        activeDownload.statusText = `${activeDownload.downloaded}/${activeDownload.total} (${formatBytes(activeDownload.totalBytes)})`;
+        broadcastDownloadUpdate();
+        
+        // Update storage periodically
+        if (i % 10 === 0) {
+          await updateDownloadInStorage(activeDownload.id, {
+            downloaded: activeDownload.downloaded,
+            totalBytes: activeDownload.totalBytes,
+            statusText: activeDownload.statusText
+          });
+        }
+      } catch (e) {
+        console.warn(`Failed to download segment ${i}:`, e);
+        activeDownload.downloaded++;
+      }
+      
+      // Small delay
+      await new Promise(r => setTimeout(r, 25));
+    }
+    
+    if (activeDownload.aborted) {
+      throw new Error("Canceled by user");
+    }
+    
+    // Combine chunks
+    activeDownload.statusText = "Combining segments...";
+    broadcastDownloadUpdate();
+    
+    const chunks = [];
+    if (activeDownload.initChunk) {
+      chunks.push(activeDownload.initChunk);
+    }
+    for (const result of activeDownload.results) {
+      if (result) chunks.push(result);
+    }
+    
+    if (chunks.length === 0) {
+      throw new Error("No segments downloaded");
+    }
+    
+    const mimeType = isTS ? "video/mp2t" : "video/mp4";
+    const combined = new Blob(chunks, { type: mimeType });
+    const url = URL.createObjectURL(combined);
+    
+    chrome.downloads.download({
+      url: url,
+      filename: activeDownload.filename,
+      saveAs: true
+    }, () => {
+      setTimeout(() => URL.revokeObjectURL(url), 120000);
+    });
+    
+    // Mark complete
+    activeDownload.statusText = `Done - ${formatBytes(activeDownload.totalBytes)}`;
+    await saveDownloadToStorage({
+      id: activeDownload.id,
+      filename: activeDownload.filename,
+      status: "completed",
+      total: activeDownload.total,
+      downloaded: activeDownload.downloaded,
+      totalBytes: activeDownload.totalBytes,
+      duration: activeDownload.duration,
+      startTime: activeDownload.startTime,
+      endTime: Date.now(),
+      statusText: `${formatBytes(activeDownload.totalBytes)}`
+    });
+    
+    broadcastDownloadUpdate();
+    
+  } catch (e) {
+    console.error("Download failed:", e);
+    activeDownload.statusText = e.message;
+    await updateDownloadInStorage(activeDownload.id, {
+      status: "error",
+      statusText: e.message,
+      endTime: Date.now()
+    });
+    broadcastDownloadUpdate();
+  } finally {
+    activeDownload = null;
+  }
+}
