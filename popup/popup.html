@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Stealthy Network</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header class="header">
+      <h1>Stealthy Network</h1>
+    </header>
+
+    <main class="content">
+      <div id="status" class="status">Scanning...</div>
+
+      <div id="videoList" class="video-list"></div>
+
+      <div id="noVideos" class="no-videos" style="display: none;">
+        No videos detected on this page.
+      </div>
+
+      <div class="actions">
+        <button id="refreshBtn" class="btn btn-secondary">Refresh</button>
+        <button id="advancedBtn" class="btn btn-primary">Advanced Panel</button>
+      </div>
+    </main>
+
+    <script src="popup.js"></script>
+  </body>
+</html>
