@@ -573,7 +573,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 // ============================================
 
 const DB_NAME = "StealthyDownloads";
-const DB_VERSION = 2;
+const DB_VERSION = 3; // Increment to force schema update
 const STORE_NAME = "chunks";
 
 function openDB() {
@@ -585,12 +585,15 @@ function openDB() {
     
     request.onupgradeneeded = (event) => {
       const db = event.target.result;
+      console.log("Upgrading IndexedDB from version", event.oldVersion, "to", DB_VERSION);
+      
       // Store for download metadata
       if (!db.objectStoreNames.contains(STORE_NAME)) {
         db.createObjectStore(STORE_NAME, { keyPath: "id" });
       }
-      // Store for individual chunks (new)
+      // Store for individual chunks
       if (!db.objectStoreNames.contains("segments")) {
+        console.log("Creating segments store");
         const segStore = db.createObjectStore("segments", { keyPath: "key" });
         segStore.createIndex("downloadId", "downloadId", { unique: false });
       }
@@ -600,6 +603,11 @@ function openDB() {
 
 // Store a single chunk
 async function storeChunk(downloadId, index, data) {
+  if (!data || data.byteLength === 0) {
+    console.warn(`Skipping empty chunk ${index} for ${downloadId}`);
+    return;
+  }
+  
   const db = await openDB();
   return new Promise((resolve, reject) => {
     const tx = db.transaction("segments", "readwrite");
@@ -611,10 +619,18 @@ async function storeChunk(downloadId, index, data) {
       data: data
     });
     
-    request.onsuccess = () => resolve();
-    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      resolve();
+    };
+    request.onerror = () => {
+      console.error(`Failed to store chunk ${index}:`, request.error);
+      reject(request.error);
+    };
     
     tx.oncomplete = () => db.close();
+    tx.onerror = () => {
+      console.error(`Transaction failed for chunk ${index}:`, tx.error);
+    };
   });
 }
 
@@ -664,6 +680,7 @@ async function getDownloadChunks(id) {
   
   if (!meta) {
     db.close();
+    console.error("No metadata found for download:", id);
     return null;
   }
   
@@ -679,9 +696,27 @@ async function getDownloadChunks(id) {
   
   db.close();
   
-  // Sort chunks by index and extract data
+  console.log(`Retrieved ${chunks.length} chunks for download ${id}`);
+  
+  if (chunks.length === 0) {
+    console.error("No chunks found in IndexedDB for download:", id);
+    return null;
+  }
+  
+  // Sort chunks by index (init segment at -1 comes first)
   chunks.sort((a, b) => a.index - b.index);
-  const chunkData = chunks.map(c => c.data);
+  
+  // Extract actual data from each chunk record
+  const chunkData = [];
+  for (const chunk of chunks) {
+    if (chunk.data) {
+      chunkData.push(chunk.data);
+    } else {
+      console.warn(`Chunk ${chunk.index} has no data`);
+    }
+  }
+  
+  console.log(`Extracted ${chunkData.length} data chunks, total expected: ${meta.chunkCount}`);
   
   return {
     id: meta.id,
