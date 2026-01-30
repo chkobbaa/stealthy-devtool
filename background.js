@@ -538,8 +538,92 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.type === "getDownloadChunks") {
+    getDownloadChunks(message.downloadId).then(data => {
+      sendResponse({ ok: true, data });
+    }).catch(err => {
+      sendResponse({ ok: false, error: err.message });
+    });
+    return true;
+  }
+
+  if (message.type === "deleteDownloadChunks") {
+    deleteDownloadChunks(message.downloadId).then(() => {
+      sendResponse({ ok: true });
+    }).catch(err => {
+      sendResponse({ ok: false, error: err.message });
+    });
+    return true;
+  }
+
   return false;
 });
+
+// ============================================
+// INDEXEDDB FOR DOWNLOAD CHUNKS
+// ============================================
+
+const DB_NAME = "StealthyDownloads";
+const DB_VERSION = 1;
+const STORE_NAME = "chunks";
+
+function openDB() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(DB_NAME, DB_VERSION);
+    
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => resolve(request.result);
+    
+    request.onupgradeneeded = (event) => {
+      const db = event.target.result;
+      if (!db.objectStoreNames.contains(STORE_NAME)) {
+        db.createObjectStore(STORE_NAME, { keyPath: "id" });
+      }
+    };
+  });
+}
+
+async function storeDownloadChunks(data) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, "readwrite");
+    const store = tx.objectStore(STORE_NAME);
+    const request = store.put(data);
+    
+    request.onsuccess = () => resolve();
+    request.onerror = () => reject(request.error);
+    
+    tx.oncomplete = () => db.close();
+  });
+}
+
+async function getDownloadChunks(id) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, "readonly");
+    const store = tx.objectStore(STORE_NAME);
+    const request = store.get(id);
+    
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+    
+    tx.oncomplete = () => db.close();
+  });
+}
+
+async function deleteDownloadChunks(id) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, "readwrite");
+    const store = tx.objectStore(STORE_NAME);
+    const request = store.delete(id);
+    
+    request.onsuccess = () => resolve();
+    request.onerror = () => reject(request.error);
+    
+    tx.oncomplete = () => db.close();
+  });
+}
 
 // ============================================
 // BACKGROUND DOWNLOAD MANAGER
@@ -997,16 +1081,25 @@ async function startBackgroundDownload(data) {
       throw new Error("No segments downloaded");
     }
     
-    const mimeType = isTS ? "video/mp2t" : "video/mp4";
-    const combined = new Blob(chunks, { type: mimeType });
-    const url = URL.createObjectURL(combined);
-    
-    chrome.downloads.download({
-      url: url,
+    // Store chunks in IndexedDB for the downloads page to retrieve
+    const downloadData = {
+      id: activeDownload.id,
       filename: activeDownload.filename,
-      saveAs: true
-    }, () => {
-      setTimeout(() => URL.revokeObjectURL(url), 120000);
+      mimeType: isTS ? "video/mp2t" : "video/mp4",
+      chunks: chunks,
+      totalBytes: activeDownload.totalBytes
+    };
+    
+    await storeDownloadChunks(downloadData);
+    
+    // Notify that download is ready for final save
+    activeDownload.statusText = "Ready to save...";
+    activeDownload.readyToSave = true;
+    broadcastDownloadUpdate();
+    
+    // Open downloads page to trigger the actual file save
+    chrome.tabs.create({ 
+      url: chrome.runtime.getURL(`downloads/downloads.html?save=${activeDownload.id}`)
     });
     
     // Mark complete

@@ -6,6 +6,54 @@ const clearCompletedBtn = document.getElementById("clearCompletedBtn");
 
 let downloads = {};
 
+// Check if we need to save a download (from URL param)
+async function checkPendingSave() {
+  const params = new URLSearchParams(window.location.search);
+  const saveId = params.get("save");
+  
+  if (saveId) {
+    // Remove the param from URL
+    window.history.replaceState({}, "", window.location.pathname);
+    
+    // Retrieve chunks from background
+    try {
+      const response = await chrome.runtime.sendMessage({ 
+        type: "getDownloadChunks", 
+        downloadId: saveId 
+      });
+      
+      if (response.ok && response.data) {
+        const { filename, mimeType, chunks, totalBytes } = response.data;
+        
+        // Combine chunks into blob
+        const combined = new Blob(chunks, { type: mimeType });
+        const url = URL.createObjectURL(combined);
+        
+        // Trigger download
+        chrome.downloads.download({
+          url: url,
+          filename: filename,
+          saveAs: true
+        }, () => {
+          // Clean up after a delay
+          setTimeout(() => {
+            URL.revokeObjectURL(url);
+            // Delete chunks from IndexedDB
+            chrome.runtime.sendMessage({ 
+              type: "deleteDownloadChunks", 
+              downloadId: saveId 
+            });
+          }, 60000);
+        });
+        
+        console.log(`Saving ${filename} (${formatBytes(totalBytes)})`);
+      }
+    } catch (e) {
+      console.error("Failed to save download:", e);
+    }
+  }
+}
+
 // Load downloads from storage
 async function loadDownloads() {
   const result = await chrome.storage.local.get("downloads");
@@ -198,3 +246,4 @@ setInterval(loadDownloads, 1000);
 
 // Initial load
 loadDownloads();
+checkPendingSave();
