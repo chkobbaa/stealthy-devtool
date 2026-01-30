@@ -279,6 +279,12 @@ async function cancelDownload(id) {
 }
 
 async function removeDownload(id) {
+  // Also delete any chunks from IndexedDB
+  try {
+    await chrome.runtime.sendMessage({ type: "deleteDownloadChunks", downloadId: id });
+  } catch (e) {
+    // Ignore - chunks may not exist
+  }
   delete downloads[id];
   await saveDownloads();
   renderDownloads();

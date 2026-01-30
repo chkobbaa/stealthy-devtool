@@ -988,7 +988,7 @@ function setupSegmentActions() {
     }
     
     // Check for manifest (preferred) or captured segments
-    const manifest = detectedVideos.find(v => 
+    const manifest = (detectedVideos || []).find(v => 
       v.url.toLowerCase().includes(".m3u8") || 
       v.url.toLowerCase().includes(".mpd")
     );
