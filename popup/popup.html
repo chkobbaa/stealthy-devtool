@@ -16,6 +16,34 @@
 
       <div id="videoList" class="video-list"></div>
 
+      <div id="segmentGroup" class="segment-group" style="display: none;">
+        <div class="segment-header">
+          <span class="segment-title">Segmented Stream Detected</span>
+          <span id="segmentCount" class="segment-count"></span>
+        </div>
+        <div class="segment-info">
+          This video is delivered in segments. Use one of these methods:
+        </div>
+        <div class="segment-actions">
+          <button id="copyFfmpegBtn" class="btn btn-primary btn-small">Copy ffmpeg Command</button>
+          <button id="copyManifestBtn" class="btn btn-secondary btn-small">Copy Manifest URL</button>
+          <button id="copyAllSegmentsBtn" class="btn btn-secondary btn-small">Copy All URLs</button>
+        </div>
+        <div class="segment-help">
+          <details>
+            <summary>How to download</summary>
+            <div class="help-content">
+              <p><strong>Option 1: ffmpeg (recommended)</strong></p>
+              <code>ffmpeg -i "manifest_url" -c copy output.mp4</code>
+              <p><strong>Option 2: yt-dlp</strong></p>
+              <code>yt-dlp "page_url"</code>
+              <p><strong>Option 3: VLC</strong></p>
+              <p>Media → Open Network Stream → paste manifest URL</p>
+            </div>
+          </details>
+        </div>
+      </div>
+
       <div id="noVideos" class="no-videos" style="display: none;">
         No videos detected on this page.
       </div>

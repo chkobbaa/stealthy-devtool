@@ -125,3 +125,82 @@ body {
   font-size: 12px;
   padding: 20px 0;
 }
+
+.segment-group {
+  background: #fff3cd;
+  border: 1px solid #ffc107;
+  border-radius: 6px;
+  padding: 12px;
+  margin-bottom: 16px;
+}
+
+.segment-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.segment-title {
+  font-weight: 600;
+  font-size: 13px;
+  color: #856404;
+}
+
+.segment-count {
+  background: #ffc107;
+  color: #856404;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.segment-info {
+  font-size: 11px;
+  color: #856404;
+  margin-bottom: 10px;
+}
+
+.segment-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.segment-help {
+  font-size: 11px;
+}
+
+.segment-help summary {
+  cursor: pointer;
+  color: #856404;
+  font-weight: 500;
+}
+
+.segment-help details[open] summary {
+  margin-bottom: 8px;
+}
+
+.help-content {
+  background: #fff;
+  border-radius: 4px;
+  padding: 10px;
+  font-size: 11px;
+}
+
+.help-content p {
+  margin: 0 0 6px 0;
+}
+
+.help-content code {
+  display: block;
+  background: #f3f4f6;
+  padding: 6px 8px;
+  border-radius: 4px;
+  font-family: monospace;
+  font-size: 10px;
+  margin-bottom: 10px;
+  word-break: break-all;
+}

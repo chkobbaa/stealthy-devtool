@@ -3,13 +3,35 @@ const noVideos = document.getElementById("noVideos");
 const status = document.getElementById("status");
 const refreshBtn = document.getElementById("refreshBtn");
 const advancedBtn = document.getElementById("advancedBtn");
+const segmentGroup = document.getElementById("segmentGroup");
+const segmentCount = document.getElementById("segmentCount");
+const copyFfmpegBtn = document.getElementById("copyFfmpegBtn");
+const copyManifestBtn = document.getElementById("copyManifestBtn");
+const copyAllSegmentsBtn = document.getElementById("copyAllSegmentsBtn");
 
 let currentTabId = null;
+let currentPageUrl = "";
+let detectedManifest = null;
+let detectedSegments = [];
+
+// Segment file patterns
+const SEGMENT_EXTENSIONS = [".ts", ".m4s", ".m4v", ".m4a", ".fmp4"];
+const SEGMENT_PATTERNS = [
+  /seg-\d+/i,
+  /segment[\-_]?\d+/i,
+  /chunk[\-_]?\d+/i,
+  /frag[\-_]?\d+/i,
+  /part[\-_]?\d+/i,
+  /\d+\.ts/i,
+  /\d+\.m4s/i,
+  /init\.mp4/i,
+  /init\.m4s/i
+];
 
 // Direct video file extensions
 const VIDEO_EXTENSIONS = [
   ".mp4", ".webm", ".ogg", ".mov", ".avi", ".mkv", ".m4v", ".flv", ".wmv",
-  ".3gp", ".ts", ".m4s", ".f4v", ".vob"
+  ".3gp", ".f4v", ".vob"
 ];
 
 // Streaming manifest extensions
@@ -121,6 +143,27 @@ function isStreamingManifest(url) {
   for (const ext of MANIFEST_EXTENSIONS) {
     if (lower.includes(ext)) return true;
   }
+  // Check content type hints in URL
+  if (lower.includes("manifest") && (lower.includes("hls") || lower.includes("dash"))) {
+    return true;
+  }
+  return false;
+}
+
+function isSegmentFile(url) {
+  if (!url) return false;
+  const lower = url.toLowerCase();
+  
+  // Check segment extensions
+  for (const ext of SEGMENT_EXTENSIONS) {
+    if (lower.includes(ext + "?") || lower.endsWith(ext)) return true;
+  }
+  
+  // Check segment URL patterns
+  for (const pattern of SEGMENT_PATTERNS) {
+    if (pattern.test(lower)) return true;
+  }
+  
   return false;
 }
 
@@ -280,6 +323,9 @@ async function scanForVideos() {
   status.textContent = "Scanning...";
   videoList.innerHTML = "";
   noVideos.style.display = "none";
+  segmentGroup.style.display = "none";
+  detectedManifest = null;
+  detectedSegments = [];
   
   try {
     const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -290,6 +336,7 @@ async function scanForVideos() {
     }
     
     currentTabId = tab.id;
+    currentPageUrl = tab.url || "";
     
     const response = await chrome.runtime.sendMessage({
       type: "getRequests",
@@ -298,67 +345,113 @@ async function scanForVideos() {
     
     const requests = response.requests || [];
     
-    // Filter for video requests using multiple detection strategies
-    const videos = requests.filter((entry) => {
-      // Strategy 1: Resource type is media
-      if (entry.type === "media") return true;
-      
-      // Strategy 2: URL pattern matching
-      if (isVideoUrl(entry.url)) return true;
-      
-      // Strategy 3: Response headers indicate video content
-      if (hasVideoContentType(entry.responseHeaders)) return true;
-      
-      // Strategy 4: Large file with range support (likely video)
-      if (entry.size >= MIN_VIDEO_SIZE && hasRangeSupport(entry.responseHeaders)) {
-        return true;
-      }
-      
-      // Strategy 5: Large XHR/fetch that could be video chunks
-      if ((entry.type === "xhr" || entry.type === "fetch") && entry.size >= MIN_VIDEO_SIZE) {
-        // Additional check: has video-like content type
-        if (hasVideoContentType(entry.responseHeaders)) return true;
-      }
-      
-      return false;
-    });
+    // Separate manifests, segments, and direct videos
+    const manifests = [];
+    const segments = [];
+    const directVideos = [];
     
-    // Deduplicate by URL, preferring entries with more info
-    const seen = new Map();
-    for (const video of videos) {
-      const existing = seen.get(video.url);
-      if (!existing || (video.size > existing.size)) {
-        seen.set(video.url, video);
+    for (const entry of requests) {
+      // Check if it's a manifest
+      if (isStreamingManifest(entry.url)) {
+        manifests.push(entry);
+        continue;
+      }
+      
+      // Check if it's a segment
+      if (isSegmentFile(entry.url)) {
+        segments.push(entry);
+        continue;
+      }
+      
+      // Check if it's a direct video
+      if (entry.type === "media") {
+        directVideos.push(entry);
+        continue;
+      }
+      
+      if (isVideoUrl(entry.url)) {
+        directVideos.push(entry);
+        continue;
+      }
+      
+      if (hasVideoContentType(entry.responseHeaders)) {
+        directVideos.push(entry);
+        continue;
+      }
+      
+      if (entry.size >= MIN_VIDEO_SIZE && hasRangeSupport(entry.responseHeaders)) {
+        directVideos.push(entry);
+        continue;
       }
     }
-    const unique = Array.from(seen.values());
     
-    // Sort: manifests first, then by size descending
-    unique.sort((a, b) => {
-      const aManifest = isStreamingManifest(a.url) ? 1 : 0;
-      const bManifest = isStreamingManifest(b.url) ? 1 : 0;
-      if (bManifest !== aManifest) return bManifest - aManifest;
-      return (b.size || 0) - (a.size || 0);
-    });
+    // Deduplicate direct videos
+    const seenVideos = new Map();
+    for (const video of directVideos) {
+      const existing = seenVideos.get(video.url);
+      if (!existing || (video.size > existing.size)) {
+        seenVideos.set(video.url, video);
+      }
+    }
+    const uniqueVideos = Array.from(seenVideos.values());
     
-    if (unique.length === 0) {
+    // Deduplicate manifests
+    const seenManifests = new Map();
+    for (const m of manifests) {
+      if (!seenManifests.has(m.url)) {
+        seenManifests.set(m.url, m);
+      }
+    }
+    const uniqueManifests = Array.from(seenManifests.values());
+    
+    // Deduplicate segments
+    const seenSegments = new Map();
+    for (const s of segments) {
+      if (!seenSegments.has(s.url)) {
+        seenSegments.set(s.url, s);
+      }
+    }
+    const uniqueSegments = Array.from(seenSegments.values());
+    
+    // Store for segment group actions
+    detectedManifest = uniqueManifests[0] || null;
+    detectedSegments = uniqueSegments;
+    
+    // Show segment group if we have segments or manifests
+    if (uniqueSegments.length > 0 || uniqueManifests.length > 0) {
+      segmentGroup.style.display = "block";
+      const totalParts = uniqueSegments.length + uniqueManifests.length;
+      segmentCount.textContent = `${uniqueSegments.length} segments, ${uniqueManifests.length} manifest(s)`;
+    }
+    
+    // Sort direct videos by size
+    uniqueVideos.sort((a, b) => (b.size || 0) - (a.size || 0));
+    
+    // Build status
+    const totalFound = uniqueVideos.length + uniqueManifests.length + (uniqueSegments.length > 0 ? 1 : 0);
+    
+    if (totalFound === 0) {
       status.textContent = "No videos detected.";
       noVideos.style.display = "block";
       return;
     }
     
-    const manifestCount = unique.filter((v) => isStreamingManifest(v.url)).length;
-    const directCount = unique.length - manifestCount;
-    
-    let statusText = `Found ${unique.length} video(s)`;
-    if (manifestCount > 0 && directCount > 0) {
-      statusText = `Found ${directCount} video(s), ${manifestCount} stream(s)`;
-    } else if (manifestCount > 0) {
-      statusText = `Found ${manifestCount} stream(s)`;
+    let statusParts = [];
+    if (uniqueVideos.length > 0) {
+      statusParts.push(`${uniqueVideos.length} video(s)`);
     }
-    status.textContent = statusText;
+    if (uniqueManifests.length > 0 || uniqueSegments.length > 0) {
+      statusParts.push(`1 stream`);
+    }
+    status.textContent = `Found ${statusParts.join(", ")}`;
     
-    for (const video of unique) {
+    // Add manifests to list
+    for (const manifest of uniqueManifests) {
+      videoList.appendChild(createVideoItem(manifest));
+    }
+    
+    // Add direct videos to list
+    for (const video of uniqueVideos) {
       videoList.appendChild(createVideoItem(video));
     }
     
@@ -366,6 +459,59 @@ async function scanForVideos() {
     status.textContent = "Error scanning page.";
     console.error(error);
   }
+}
+
+function setupSegmentActions() {
+  copyFfmpegBtn.addEventListener("click", () => {
+    let cmd = "";
+    if (detectedManifest) {
+      cmd = `ffmpeg -i "${detectedManifest.url}" -c copy output.mp4`;
+    } else if (detectedSegments.length > 0) {
+      // Create a file list approach
+      cmd = `# Save segment URLs to segments.txt, then:\nffmpeg -f concat -safe 0 -i segments.txt -c copy output.mp4\n\n# Or download with aria2:\naria2c -i segments.txt`;
+    }
+    navigator.clipboard.writeText(cmd).then(() => {
+      copyFfmpegBtn.textContent = "Copied!";
+      setTimeout(() => {
+        copyFfmpegBtn.textContent = "Copy ffmpeg Command";
+      }, 1500);
+    });
+  });
+  
+  copyManifestBtn.addEventListener("click", () => {
+    if (detectedManifest) {
+      navigator.clipboard.writeText(detectedManifest.url).then(() => {
+        copyManifestBtn.textContent = "Copied!";
+        setTimeout(() => {
+          copyManifestBtn.textContent = "Copy Manifest URL";
+        }, 1500);
+      });
+    } else {
+      copyManifestBtn.textContent = "No manifest";
+      setTimeout(() => {
+        copyManifestBtn.textContent = "Copy Manifest URL";
+      }, 1500);
+    }
+  });
+  
+  copyAllSegmentsBtn.addEventListener("click", () => {
+    const urls = [];
+    if (detectedManifest) {
+      urls.push(`# Manifest:\n${detectedManifest.url}\n`);
+    }
+    if (detectedSegments.length > 0) {
+      urls.push(`# Segments (${detectedSegments.length}):`);
+      for (const seg of detectedSegments) {
+        urls.push(seg.url);
+      }
+    }
+    navigator.clipboard.writeText(urls.join("\n")).then(() => {
+      copyAllSegmentsBtn.textContent = "Copied!";
+      setTimeout(() => {
+        copyAllSegmentsBtn.textContent = "Copy All URLs";
+      }, 1500);
+    });
+  });
 }
 
 refreshBtn.addEventListener("click", () => {
@@ -378,5 +524,6 @@ advancedBtn.addEventListener("click", async () => {
   window.close();
 });
 
-// Initial scan
+// Setup and initial scan
+setupSegmentActions();
 scanForVideos();
