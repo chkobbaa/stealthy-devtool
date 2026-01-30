@@ -40,11 +40,13 @@
           <thead>
             <tr>
               <th class="col-name">Name</th>
+              <th class="col-url">URL</th>
               <th class="col-status">Status</th>
               <th class="col-type">Type</th>
               <th class="col-initiator">Initiator</th>
               <th class="col-size">Size</th>
               <th class="col-time">Time</th>
+              <th class="col-actions">Actions</th>
             </tr>
           </thead>
           <tbody id="requestsBody"></tbody>
@@ -55,6 +57,10 @@
       <section class="details-pane">
         <div class="details-header">
           <div class="details-title" id="detailsTitle">Select a request</div>
+          <div class="details-actions">
+            <button id="copyUrlBtn" disabled>Copy URL</button>
+            <button id="copyCurlBtn" disabled>Copy as cURL</button>
+          </div>
         </div>
         <div class="details-tabs">
           <button class="tab-button active" data-tab="headers">Headers</button>

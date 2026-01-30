@@ -18,6 +18,8 @@ const debuggerBtn = document.getElementById("debuggerBtn");
 const captureStatus = document.getElementById("captureStatus");
 const tabSelect = document.getElementById("tabSelect");
 const refreshTabsBtn = document.getElementById("refreshTabsBtn");
+const copyUrlBtn = document.getElementById("copyUrlBtn");
+const copyCurlBtn = document.getElementById("copyCurlBtn");
 const detailsTitle = document.getElementById("detailsTitle");
 
 const tabPanels = {
@@ -99,12 +101,22 @@ function renderTable() {
 
     row.innerHTML = `
       <td title="${entry.url}">${getNameFromUrl(entry.url)}</td>
+      <td title="${entry.url}">${entry.url}</td>
       <td>${entry.status || entry.error || ""}</td>
       <td>${entry.type}</td>
       <td title="${entry.initiator || ""}">${getHostname(entry.initiator)}</td>
       <td class="col-size">${formatBytes(entry.size)}</td>
       <td class="col-time">${formatDuration(entry.duration)}</td>
+      <td class="col-actions"><button class="row-btn" data-action="copy">Copy</button></td>
     `;
+
+    const copyBtn = row.querySelector(".row-btn");
+    if (copyBtn) {
+      copyBtn.addEventListener("click", (event) => {
+        event.stopPropagation();
+        copyText(entry.url);
+      });
+    }
 
     row.addEventListener("click", () => {
       state.selectedId = entry.id;
@@ -207,6 +219,8 @@ function renderTiming(entry) {
 function renderDetails(entry) {
   if (!entry) return;
   detailsTitle.textContent = `${entry.method} ${entry.url}`;
+  copyUrlBtn.disabled = false;
+  copyCurlBtn.disabled = false;
   renderHeaders(entry);
   renderPayload(entry);
   renderPreview(entry);
@@ -318,6 +332,33 @@ function buildHar(entries) {
   };
 }
 
+function buildCurl(entry) {
+  const parts = ["curl", "-X", entry.method || "GET", `"${entry.url}"`];
+  (entry.requestHeaders || []).forEach((header) => {
+    const name = header.name || "";
+    const value = header.value || "";
+    parts.push("-H", `"${name}: ${value}"`);
+  });
+  if (entry.requestBody && entry.requestBody.value) {
+    const payload = String(entry.requestBody.value).replace(/"/g, "\\\"");
+    parts.push("--data", `"${payload}"`);
+  }
+  return parts.join(" ");
+}
+
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    const temp = document.createElement("textarea");
+    temp.value = text;
+    document.body.appendChild(temp);
+    temp.select();
+    document.execCommand("copy");
+    temp.remove();
+  }
+}
+
 function setTab(tabName) {
   document.querySelectorAll(".tab-button").forEach((btn) => {
     btn.classList.toggle("active", btn.dataset.tab === tabName);
@@ -390,6 +431,18 @@ function attachUiListeners() {
     updateCaptureStatus();
   });
 
+  copyUrlBtn.addEventListener("click", () => {
+    const entry = state.requests.find((item) => item.id === state.selectedId);
+    if (!entry) return;
+    copyText(entry.url);
+  });
+
+  copyCurlBtn.addEventListener("click", () => {
+    const entry = state.requests.find((item) => item.id === state.selectedId);
+    if (!entry) return;
+    copyText(buildCurl(entry));
+  });
+
   tabSelect.addEventListener("change", async () => {
     const nextId = Number(tabSelect.value);
     if (!Number.isFinite(nextId)) return;
@@ -440,6 +493,10 @@ async function loadInitialRequests() {
   state.requests = response.requests || [];
   const dbg = await chrome.runtime.sendMessage({ type: "getDebuggerStatus", tabId: state.tabId });
   state.debuggerAttached = !!dbg.attached;
+  if (!state.selectedId) {
+    copyUrlBtn.disabled = true;
+    copyCurlBtn.disabled = true;
+  }
   updateCaptureStatus();
   renderTable();
 }
@@ -465,6 +522,8 @@ chrome.runtime.onMessage.addListener((message) => {
     state.requests = [];
     state.selectedId = null;
     detailsTitle.textContent = "Select a request";
+    copyUrlBtn.disabled = true;
+    copyCurlBtn.disabled = true;
     Object.values(tabPanels).forEach((panel) => (panel.innerHTML = ""));
     renderTable();
   }
