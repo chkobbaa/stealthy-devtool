@@ -1143,8 +1143,6 @@ async function startBackgroundDownload(data) {
     }
     
     // Store metadata for recovery
-    const firstUrl = activeDownload.segments[0]?.url || "";
-    const isTS = firstUrl.toLowerCase().includes(".ts");
     await storeDownloadMeta({
       id: activeDownload.id,
       filename: activeDownload.filename,
