@@ -573,7 +573,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 // ============================================
 
 const DB_NAME = "StealthyDownloads";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const STORE_NAME = "chunks";
 
 function openDB() {
@@ -585,53 +585,152 @@ function openDB() {
     
     request.onupgradeneeded = (event) => {
       const db = event.target.result;
+      // Store for download metadata
       if (!db.objectStoreNames.contains(STORE_NAME)) {
         db.createObjectStore(STORE_NAME, { keyPath: "id" });
+      }
+      // Store for individual chunks (new)
+      if (!db.objectStoreNames.contains("segments")) {
+        const segStore = db.createObjectStore("segments", { keyPath: "key" });
+        segStore.createIndex("downloadId", "downloadId", { unique: false });
       }
     };
   });
 }
 
-async function storeDownloadChunks(data) {
+// Store a single chunk
+async function storeChunk(downloadId, index, data) {
   const db = await openDB();
   return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE_NAME, "readwrite");
-    const store = tx.objectStore(STORE_NAME);
-    const request = store.put(data);
+    const tx = db.transaction("segments", "readwrite");
+    const store = tx.objectStore("segments");
+    const request = store.put({
+      key: `${downloadId}_${index}`,
+      downloadId: downloadId,
+      index: index,
+      data: data
+    });
     
     request.onsuccess = () => resolve();
     request.onerror = () => reject(request.error);
     
     tx.oncomplete = () => db.close();
   });
+}
+
+// Store download metadata (without chunks)
+async function storeDownloadMeta(meta) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, "readwrite");
+    const store = tx.objectStore(STORE_NAME);
+    const request = store.put(meta);
+    
+    request.onsuccess = () => resolve();
+    request.onerror = () => reject(request.error);
+    
+    tx.oncomplete = () => db.close();
+  });
+}
+
+// Legacy function for compatibility
+async function storeDownloadChunks(data) {
+  // Store metadata separately from chunks
+  await storeDownloadMeta({
+    id: data.id,
+    filename: data.filename,
+    mimeType: data.mimeType,
+    totalBytes: data.totalBytes,
+    chunkCount: data.chunks.length
+  });
+  
+  // Store each chunk individually
+  for (let i = 0; i < data.chunks.length; i++) {
+    await storeChunk(data.id, i, data.chunks[i]);
+  }
 }
 
 async function getDownloadChunks(id) {
   const db = await openDB();
-  return new Promise((resolve, reject) => {
+  
+  // Get metadata
+  const meta = await new Promise((resolve, reject) => {
     const tx = db.transaction(STORE_NAME, "readonly");
     const store = tx.objectStore(STORE_NAME);
     const request = store.get(id);
-    
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
-    
-    tx.oncomplete = () => db.close();
   });
+  
+  if (!meta) {
+    db.close();
+    return null;
+  }
+  
+  // Get all chunks for this download
+  const chunks = await new Promise((resolve, reject) => {
+    const tx = db.transaction("segments", "readonly");
+    const store = tx.objectStore("segments");
+    const index = store.index("downloadId");
+    const request = index.getAll(id);
+    request.onsuccess = () => resolve(request.result || []);
+    request.onerror = () => reject(request.error);
+  });
+  
+  db.close();
+  
+  // Sort chunks by index and extract data
+  chunks.sort((a, b) => a.index - b.index);
+  const chunkData = chunks.map(c => c.data);
+  
+  return {
+    id: meta.id,
+    filename: meta.filename,
+    mimeType: meta.mimeType,
+    totalBytes: meta.totalBytes,
+    chunks: chunkData
+  };
 }
 
 async function deleteDownloadChunks(id) {
   const db = await openDB();
-  return new Promise((resolve, reject) => {
+  
+  // Delete metadata
+  await new Promise((resolve, reject) => {
     const tx = db.transaction(STORE_NAME, "readwrite");
     const store = tx.objectStore(STORE_NAME);
     const request = store.delete(id);
-    
     request.onsuccess = () => resolve();
     request.onerror = () => reject(request.error);
-    
-    tx.oncomplete = () => db.close();
   });
+  
+  // Delete all chunks for this download
+  await new Promise((resolve, reject) => {
+    const tx = db.transaction("segments", "readwrite");
+    const store = tx.objectStore("segments");
+    const index = store.index("downloadId");
+    const request = index.getAllKeys(id);
+    
+    request.onsuccess = () => {
+      const keys = request.result || [];
+      let deleted = 0;
+      if (keys.length === 0) {
+        resolve();
+        return;
+      }
+      for (const key of keys) {
+        const delReq = store.delete(key);
+        delReq.onsuccess = () => {
+          deleted++;
+          if (deleted === keys.length) resolve();
+        };
+        delReq.onerror = () => reject(delReq.error);
+      }
+    };
+    request.onerror = () => reject(request.error);
+  });
+  
+  db.close();
 }
 
 async function listAllDownloadChunks() {
@@ -962,9 +1061,7 @@ async function startBackgroundDownload(data) {
     statusText: "Starting...",
     startTime: Date.now(),
     segments: [],
-    initSegmentUrl: null,
-    initChunk: null,
-    results: []
+    initSegmentUrl: null
   };
   
   try {
@@ -1001,7 +1098,6 @@ async function startBackgroundDownload(data) {
     }
     
     activeDownload.total = activeDownload.segments.length;
-    activeDownload.results = new Array(activeDownload.segments.length);
     
     // Determine file type
     const firstUrl = activeDownload.segments[0]?.url || "";
@@ -1037,12 +1133,26 @@ async function startBackgroundDownload(data) {
       try {
         activeDownload.statusText = "Downloading init segment...";
         broadcastDownloadUpdate();
-        activeDownload.initChunk = await fetchSegment(activeDownload.initSegmentUrl);
-        activeDownload.totalBytes += activeDownload.initChunk.byteLength;
+        const initData = await fetchSegment(activeDownload.initSegmentUrl);
+        activeDownload.totalBytes += initData.byteLength;
+        // Store init chunk immediately (index -1)
+        await storeChunk(activeDownload.id, -1, initData);
       } catch (e) {
         console.warn("Failed to download init segment:", e);
       }
     }
+    
+    // Store metadata for recovery
+    const firstUrl = activeDownload.segments[0]?.url || "";
+    const isTS = firstUrl.toLowerCase().includes(".ts");
+    await storeDownloadMeta({
+      id: activeDownload.id,
+      filename: activeDownload.filename,
+      mimeType: isTS ? "video/mp2t" : "video/mp4",
+      totalBytes: 0, // Will be updated
+      chunkCount: activeDownload.total,
+      hasInit: !!activeDownload.initSegmentUrl
+    });
     
     // Download all segments with concurrency for speed
     const CONCURRENT_DOWNLOADS = 8;
@@ -1073,7 +1183,8 @@ async function startBackgroundDownload(data) {
         
         try {
           const data = await fetchSegment(seg.url);
-          activeDownload.results[segIndex] = data;
+          // Store chunk immediately to IndexedDB instead of keeping in memory
+          await storeChunk(activeDownload.id, segIndex, data);
           activeDownload.totalBytes += data.byteLength;
           activeDownload.downloaded++;
           completedCount++;
@@ -1118,32 +1229,19 @@ async function startBackgroundDownload(data) {
       throw new Error("Canceled by user");
     }
     
-    // Combine chunks
-    activeDownload.statusText = "Combining segments...";
+    // Update final metadata (chunks are already stored incrementally)
+    activeDownload.statusText = "Finalizing...";
     broadcastDownloadUpdate();
     
-    const chunks = [];
-    if (activeDownload.initChunk) {
-      chunks.push(activeDownload.initChunk);
-    }
-    for (const result of activeDownload.results) {
-      if (result) chunks.push(result);
-    }
-    
-    if (chunks.length === 0) {
-      throw new Error("No segments downloaded");
-    }
-    
-    // Store chunks in IndexedDB for the downloads page to retrieve
-    const downloadData = {
+    // Update metadata with final byte count
+    await storeDownloadMeta({
       id: activeDownload.id,
       filename: activeDownload.filename,
       mimeType: isTS ? "video/mp2t" : "video/mp4",
-      chunks: chunks,
-      totalBytes: activeDownload.totalBytes
-    };
-    
-    await storeDownloadChunks(downloadData);
+      totalBytes: activeDownload.totalBytes,
+      chunkCount: activeDownload.total,
+      hasInit: !!activeDownload.initSegmentUrl
+    });
     
     // Notify that download is ready for final save
     activeDownload.statusText = "Ready to save...";

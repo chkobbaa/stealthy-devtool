@@ -28,9 +28,14 @@ async function saveDownloadFromChunks(downloadId) {
     if (response.ok && response.data) {
       const { filename, mimeType, chunks, totalBytes } = response.data;
       
+      if (!chunks || chunks.length === 0) {
+        console.error("No chunks found for download");
+        return false;
+      }
+      
       console.log(`Combining ${chunks.length} chunks (${formatBytes(totalBytes)})...`);
       
-      // Combine chunks into blob
+      // Combine chunks into blob (chunks are already ArrayBuffers)
       const combined = new Blob(chunks, { type: mimeType });
       const url = URL.createObjectURL(combined);
       
@@ -39,8 +44,14 @@ async function saveDownloadFromChunks(downloadId) {
         url: url,
         filename: filename,
         saveAs: true
-      }, () => {
-        // Clean up after a delay
+      }, (downloadItemId) => {
+        if (chrome.runtime.lastError) {
+          console.error("Download error:", chrome.runtime.lastError);
+          URL.revokeObjectURL(url);
+          return;
+        }
+        
+        // Clean up after download completes or after timeout
         setTimeout(() => {
           URL.revokeObjectURL(url);
           // Delete chunks from IndexedDB
@@ -48,11 +59,13 @@ async function saveDownloadFromChunks(downloadId) {
             type: "deleteDownloadChunks", 
             downloadId: downloadId 
           });
-        }, 60000);
+        }, 120000); // 2 minutes for large files
       });
       
       console.log(`Saving ${filename} (${formatBytes(totalBytes)})`);
       return true;
+    } else {
+      console.error("Failed to get chunks:", response?.error);
     }
   } catch (e) {
     console.error("Failed to save download:", e);
