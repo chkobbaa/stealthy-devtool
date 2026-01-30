@@ -556,6 +556,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.type === "listDownloadChunks") {
+    listAllDownloadChunks().then(ids => {
+      sendResponse({ ok: true, ids });
+    }).catch(err => {
+      sendResponse({ ok: false, error: err.message, ids: [] });
+    });
+    return true;
+  }
+
   return false;
 });
 
@@ -619,6 +628,20 @@ async function deleteDownloadChunks(id) {
     const request = store.delete(id);
     
     request.onsuccess = () => resolve();
+    request.onerror = () => reject(request.error);
+    
+    tx.oncomplete = () => db.close();
+  });
+}
+
+async function listAllDownloadChunks() {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, "readonly");
+    const store = tx.objectStore(STORE_NAME);
+    const request = store.getAllKeys();
+    
+    request.onsuccess = () => resolve(request.result || []);
     request.onerror = () => reject(request.error);
     
     tx.oncomplete = () => db.close();

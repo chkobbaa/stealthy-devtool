@@ -255,3 +255,44 @@ body {
 .download-item.downloading .progress-fill {
   animation: pulse 1.5s ease-in-out infinite;
 }
+
+/* Recovery notice for unsaved downloads */
+.recovery-notice {
+  background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
+  border: 2px solid #f59e0b;
+  border-radius: 12px;
+  padding: 20px;
+  margin-bottom: 24px;
+  box-shadow: 0 4px 12px rgba(245, 158, 11, 0.2);
+}
+
+.recovery-content {
+  text-align: center;
+}
+
+.recovery-content strong {
+  font-size: 16px;
+  color: #92400e;
+  display: block;
+  margin-bottom: 8px;
+}
+
+.recovery-content p {
+  color: #78350f;
+  margin: 6px 0;
+  font-size: 13px;
+}
+
+.recovery-content .btn {
+  margin: 8px 4px 0;
+}
+
+.save-now-btn {
+  background: #10b981 !important;
+  font-size: 14px !important;
+  padding: 10px 20px !important;
+}
+
+.save-now-btn:hover {
+  background: #059669 !important;
+}

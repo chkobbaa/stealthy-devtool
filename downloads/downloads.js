@@ -12,46 +12,110 @@ async function checkPendingSave() {
   const saveId = params.get("save");
   
   if (saveId) {
+    await saveDownloadFromChunks(saveId);
     // Remove the param from URL
     window.history.replaceState({}, "", window.location.pathname);
+  }
+}
+
+async function saveDownloadFromChunks(downloadId) {
+  try {
+    const response = await chrome.runtime.sendMessage({ 
+      type: "getDownloadChunks", 
+      downloadId: downloadId 
+    });
     
-    // Retrieve chunks from background
-    try {
-      const response = await chrome.runtime.sendMessage({ 
-        type: "getDownloadChunks", 
-        downloadId: saveId 
+    if (response.ok && response.data) {
+      const { filename, mimeType, chunks, totalBytes } = response.data;
+      
+      console.log(`Combining ${chunks.length} chunks (${formatBytes(totalBytes)})...`);
+      
+      // Combine chunks into blob
+      const combined = new Blob(chunks, { type: mimeType });
+      const url = URL.createObjectURL(combined);
+      
+      // Trigger download
+      chrome.downloads.download({
+        url: url,
+        filename: filename,
+        saveAs: true
+      }, () => {
+        // Clean up after a delay
+        setTimeout(() => {
+          URL.revokeObjectURL(url);
+          // Delete chunks from IndexedDB
+          chrome.runtime.sendMessage({ 
+            type: "deleteDownloadChunks", 
+            downloadId: downloadId 
+          });
+        }, 60000);
       });
       
-      if (response.ok && response.data) {
-        const { filename, mimeType, chunks, totalBytes } = response.data;
-        
-        // Combine chunks into blob
-        const combined = new Blob(chunks, { type: mimeType });
-        const url = URL.createObjectURL(combined);
-        
-        // Trigger download
-        chrome.downloads.download({
-          url: url,
-          filename: filename,
-          saveAs: true
-        }, () => {
-          // Clean up after a delay
-          setTimeout(() => {
-            URL.revokeObjectURL(url);
-            // Delete chunks from IndexedDB
-            chrome.runtime.sendMessage({ 
-              type: "deleteDownloadChunks", 
-              downloadId: saveId 
-            });
-          }, 60000);
+      console.log(`Saving ${filename} (${formatBytes(totalBytes)})`);
+      return true;
+    }
+  } catch (e) {
+    console.error("Failed to save download:", e);
+  }
+  return false;
+}
+
+// Check for any pending downloads in IndexedDB that weren't saved
+async function checkAllPendingChunks() {
+  try {
+    const response = await chrome.runtime.sendMessage({ type: "listDownloadChunks" });
+    if (response.ok && response.ids && response.ids.length > 0) {
+      console.log(`Found ${response.ids.length} pending download(s) in storage`);
+      
+      // Show recovery UI
+      for (const id of response.ids) {
+        const chunkResponse = await chrome.runtime.sendMessage({ 
+          type: "getDownloadChunks", 
+          downloadId: id 
         });
         
-        console.log(`Saving ${filename} (${formatBytes(totalBytes)})`);
+        if (chunkResponse.ok && chunkResponse.data) {
+          const { filename, totalBytes } = chunkResponse.data;
+          showRecoveryNotice(id, filename, totalBytes);
+        }
       }
-    } catch (e) {
-      console.error("Failed to save download:", e);
     }
+  } catch (e) {
+    console.error("Error checking pending chunks:", e);
   }
+}
+
+function showRecoveryNotice(id, filename, totalBytes) {
+  const notice = document.createElement("div");
+  notice.className = "recovery-notice";
+  notice.innerHTML = `
+    <div class="recovery-content">
+      <strong>⚠️ Unsaved Download Found!</strong>
+      <p>${filename} (${formatBytes(totalBytes)})</p>
+      <p>This download was completed but not saved. Click to save now:</p>
+      <button class="btn btn-primary save-now-btn" data-id="${id}">💾 Save Now</button>
+      <button class="btn btn-secondary discard-btn" data-id="${id}">🗑️ Discard</button>
+    </div>
+  `;
+  
+  document.querySelector(".content").prepend(notice);
+  
+  notice.querySelector(".save-now-btn").addEventListener("click", async () => {
+    notice.querySelector(".save-now-btn").textContent = "Saving...";
+    notice.querySelector(".save-now-btn").disabled = true;
+    const saved = await saveDownloadFromChunks(id);
+    if (saved) {
+      notice.remove();
+    } else {
+      notice.querySelector(".save-now-btn").textContent = "Failed - Try Again";
+      notice.querySelector(".save-now-btn").disabled = false;
+    }
+  });
+  
+  notice.querySelector(".discard-btn").addEventListener("click", async () => {
+    await chrome.runtime.sendMessage({ type: "deleteDownloadChunks", downloadId: id });
+    notice.remove();
+  });
 }
 
 // Load downloads from storage
@@ -247,3 +311,4 @@ setInterval(loadDownloads, 1000);
 // Initial load
 loadDownloads();
 checkPendingSave();
+checkAllPendingChunks();
