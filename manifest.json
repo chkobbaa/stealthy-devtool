@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "Stealthy Network Panel",
+  "version": "1.0.0",
+  "description": "DevTools-like Network panel without opening DevTools.",
+  "permissions": ["webRequest", "tabs", "storage", "debugger"],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Open Network Panel"
+  }
+}
