@@ -8,11 +8,17 @@ const segmentCount = document.getElementById("segmentCount");
 const copyFfmpegBtn = document.getElementById("copyFfmpegBtn");
 const copyManifestBtn = document.getElementById("copyManifestBtn");
 const copyAllSegmentsBtn = document.getElementById("copyAllSegmentsBtn");
+const autoDownloadBtn = document.getElementById("autoDownloadBtn");
+const downloadAllSeparateBtn = document.getElementById("downloadAllSeparateBtn");
+const downloadProgress = document.getElementById("downloadProgress");
+const progressFill = document.getElementById("progressFill");
+const progressText = document.getElementById("progressText");
 
 let currentTabId = null;
 let currentPageUrl = "";
 let detectedManifest = null;
 let detectedSegments = [];
+let isDownloading = false;
 
 // Segment file patterns
 const SEGMENT_EXTENSIONS = [".ts", ".m4s", ".m4v", ".m4a", ".fmp4"];
@@ -467,13 +473,12 @@ function setupSegmentActions() {
     if (detectedManifest) {
       cmd = `ffmpeg -i "${detectedManifest.url}" -c copy output.mp4`;
     } else if (detectedSegments.length > 0) {
-      // Create a file list approach
       cmd = `# Save segment URLs to segments.txt, then:\nffmpeg -f concat -safe 0 -i segments.txt -c copy output.mp4\n\n# Or download with aria2:\naria2c -i segments.txt`;
     }
     navigator.clipboard.writeText(cmd).then(() => {
       copyFfmpegBtn.textContent = "Copied!";
       setTimeout(() => {
-        copyFfmpegBtn.textContent = "Copy ffmpeg Command";
+        copyFfmpegBtn.textContent = "Copy ffmpeg";
       }, 1500);
     });
   });
@@ -483,13 +488,13 @@ function setupSegmentActions() {
       navigator.clipboard.writeText(detectedManifest.url).then(() => {
         copyManifestBtn.textContent = "Copied!";
         setTimeout(() => {
-          copyManifestBtn.textContent = "Copy Manifest URL";
+          copyManifestBtn.textContent = "Copy Manifest";
         }, 1500);
       });
     } else {
       copyManifestBtn.textContent = "No manifest";
       setTimeout(() => {
-        copyManifestBtn.textContent = "Copy Manifest URL";
+        copyManifestBtn.textContent = "Copy Manifest";
       }, 1500);
     }
   });
@@ -512,6 +517,216 @@ function setupSegmentActions() {
       }, 1500);
     });
   });
+  
+  // Auto download - fetches and combines all segments
+  autoDownloadBtn.addEventListener("click", async () => {
+    if (isDownloading) return;
+    
+    if (detectedSegments.length === 0 && !detectedManifest) {
+      progressText.textContent = "No segments to download";
+      return;
+    }
+    
+    isDownloading = true;
+    autoDownloadBtn.disabled = true;
+    autoDownloadBtn.innerHTML = '<span class="btn-icon">⏳</span> Downloading...';
+    downloadProgress.style.display = "block";
+    
+    try {
+      await downloadAndCombineSegments();
+    } catch (error) {
+      console.error("Download failed:", error);
+      progressText.textContent = `Error: ${error.message}`;
+    } finally {
+      isDownloading = false;
+      autoDownloadBtn.disabled = false;
+      autoDownloadBtn.innerHTML = '<span class="btn-icon">▶</span> Download Video';
+    }
+  });
+  
+  // Download all segments as separate files
+  downloadAllSeparateBtn.addEventListener("click", async () => {
+    if (detectedSegments.length === 0) {
+      return;
+    }
+    
+    const timestamp = Date.now();
+    let index = 0;
+    
+    for (const seg of detectedSegments) {
+      const ext = getSegmentExtension(seg.url);
+      const filename = `segment_${String(index).padStart(4, "0")}${ext}`;
+      
+      chrome.downloads.download({
+        url: seg.url,
+        filename: `video_${timestamp}/${filename}`
+      });
+      
+      index++;
+      
+      // Small delay to avoid overwhelming
+      if (index % 5 === 0) {
+        await new Promise((r) => setTimeout(r, 100));
+      }
+    }
+    
+    downloadAllSeparateBtn.textContent = `Started ${index} downloads`;
+    setTimeout(() => {
+      downloadAllSeparateBtn.textContent = "Download Separately";
+    }, 2000);
+  });
+}
+
+function getSegmentExtension(url) {
+  const lower = url.toLowerCase();
+  if (lower.includes(".ts")) return ".ts";
+  if (lower.includes(".m4s")) return ".m4s";
+  if (lower.includes(".m4v")) return ".m4v";
+  if (lower.includes(".m4a")) return ".m4a";
+  if (lower.includes(".mp4")) return ".mp4";
+  return ".bin";
+}
+
+function sortSegments(segments) {
+  // Try to extract sequence numbers and sort
+  return [...segments].sort((a, b) => {
+    const numA = extractSegmentNumber(a.url);
+    const numB = extractSegmentNumber(b.url);
+    if (numA !== null && numB !== null) {
+      return numA - numB;
+    }
+    // Fall back to URL comparison
+    return a.url.localeCompare(b.url);
+  });
+}
+
+function extractSegmentNumber(url) {
+  // Try various patterns to extract segment number
+  const patterns = [
+    /seg[_-]?(\d+)/i,
+    /segment[_-]?(\d+)/i,
+    /chunk[_-]?(\d+)/i,
+    /frag[_-]?(\d+)/i,
+    /part[_-]?(\d+)/i,
+    /(\d+)\.(?:ts|m4s|m4v)/i,
+    /[_-](\d+)\./i
+  ];
+  
+  for (const pattern of patterns) {
+    const match = url.match(pattern);
+    if (match) {
+      return parseInt(match[1], 10);
+    }
+  }
+  return null;
+}
+
+function findInitSegment(segments) {
+  // Look for init segment (needed for m4s)
+  return segments.find((s) => {
+    const lower = s.url.toLowerCase();
+    return lower.includes("init") || lower.includes("header");
+  });
+}
+
+async function downloadAndCombineSegments() {
+  const sortedSegments = sortSegments(detectedSegments);
+  const initSegment = findInitSegment(detectedSegments);
+  
+  // Determine file type
+  const firstUrl = sortedSegments[0]?.url || "";
+  const isTS = firstUrl.toLowerCase().includes(".ts");
+  const isM4S = firstUrl.toLowerCase().includes(".m4s") || firstUrl.toLowerCase().includes(".m4v");
+  
+  const chunks = [];
+  let totalBytes = 0;
+  let downloaded = 0;
+  const total = sortedSegments.length + (initSegment && !sortedSegments.includes(initSegment) ? 1 : 0);
+  
+  progressText.textContent = `Downloading 0/${total} segments...`;
+  progressFill.style.width = "0%";
+  
+  // For m4s, download init segment first
+  if (isM4S && initSegment && !sortedSegments.includes(initSegment)) {
+    try {
+      progressText.textContent = `Downloading init segment...`;
+      const data = await fetchSegment(initSegment.url);
+      chunks.push(data);
+      totalBytes += data.byteLength;
+      downloaded++;
+      progressFill.style.width = `${(downloaded / total) * 100}%`;
+    } catch (e) {
+      console.warn("Failed to download init segment:", e);
+    }
+  }
+  
+  // Download all segments
+  for (let i = 0; i < sortedSegments.length; i++) {
+    const seg = sortedSegments[i];
+    
+    // Skip init if already downloaded
+    if (initSegment && seg.url === initSegment.url && chunks.length > 0) {
+      downloaded++;
+      continue;
+    }
+    
+    try {
+      const data = await fetchSegment(seg.url);
+      chunks.push(data);
+      totalBytes += data.byteLength;
+      downloaded++;
+      
+      const percent = Math.round((downloaded / total) * 100);
+      progressFill.style.width = `${percent}%`;
+      progressText.textContent = `Downloading ${downloaded}/${total} segments (${formatBytes(totalBytes)})...`;
+    } catch (e) {
+      console.warn(`Failed to download segment ${i}:`, e);
+      // Continue with other segments
+    }
+    
+    // Small delay to avoid rate limiting
+    if (i % 3 === 0) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  }
+  
+  if (chunks.length === 0) {
+    throw new Error("No segments downloaded");
+  }
+  
+  progressText.textContent = `Combining ${chunks.length} segments...`;
+  progressFill.style.width = "100%";
+  
+  // Combine all chunks into one blob
+  const combined = new Blob(chunks, { type: isTS ? "video/mp2t" : "video/mp4" });
+  
+  // Create download
+  const url = URL.createObjectURL(combined);
+  const filename = `video_${Date.now()}${isTS ? ".ts" : ".mp4"}`;
+  
+  chrome.downloads.download({
+    url: url,
+    filename: filename,
+    saveAs: true
+  }, (downloadId) => {
+    // Clean up blob URL after download starts
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  });
+  
+  progressText.textContent = `Done! ${formatBytes(totalBytes)} - saving as ${filename}`;
+}
+
+async function fetchSegment(url) {
+  const response = await fetch(url, {
+    mode: "cors",
+    credentials: "include"
+  });
+  
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+  
+  return await response.arrayBuffer();
 }
 
 refreshBtn.addEventListener("click", () => {

@@ -159,7 +159,72 @@ body {
 .segment-info {
   font-size: 11px;
   color: #856404;
+  margin-bottom: 12px;
+}
+
+.download-section {
+  margin-bottom: 12px;
+}
+
+.download-section .btn-primary {
+  width: 100%;
+  padding: 12px;
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.btn-icon {
+  font-size: 12px;
+}
+
+.download-progress {
+  margin-top: 10px;
+}
+
+.progress-bar {
+  height: 8px;
+  background: #fff;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  background: #1a73e8;
+  width: 0%;
+  transition: width 0.3s ease;
+}
+
+.progress-text {
+  font-size: 11px;
+  color: #856404;
+  margin-top: 6px;
+  text-align: center;
+}
+
+.manual-section {
+  font-size: 11px;
+  border-top: 1px solid #ffc107;
+  padding-top: 10px;
+}
+
+.manual-section summary {
+  cursor: pointer;
+  color: #856404;
+  font-weight: 500;
+}
+
+.manual-section[open] summary {
   margin-bottom: 10px;
+}
+
+.manual-content {
+  background: #fff;
+  border-radius: 4px;
+  padding: 10px;
 }
 
 .segment-actions {
@@ -169,24 +234,7 @@ body {
   margin-bottom: 10px;
 }
 
-.segment-help {
-  font-size: 11px;
-}
-
-.segment-help summary {
-  cursor: pointer;
-  color: #856404;
-  font-weight: 500;
-}
-
-.segment-help details[open] summary {
-  margin-bottom: 8px;
-}
-
 .help-content {
-  background: #fff;
-  border-radius: 4px;
-  padding: 10px;
   font-size: 11px;
 }
 
